@@ -66,7 +66,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
         <div className="sidebar-logo">
           <div className="sidebar-logo-mark">
             <div className="logo-icon">🎓</div>
-            <h2>UniMS</h2>
+            <h2>Erudite</h2>
           </div>
           <p>Management System</p>
         </div>

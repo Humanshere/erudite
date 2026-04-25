@@ -34,7 +34,7 @@ export default function LoginPage() {
         <div className="login-brand">
           <div className="login-logo">
             <div className="login-logo-icon">🎓</div>
-            <h2>University<br />Management System</h2>
+            <h2>Erudite<br /></h2>
           </div>
           <h1 className="login-headline">
             Manage your<br />
