@@ -54,3 +54,47 @@ class Enrollment(models.Model):
 
     def __str__(self):
         return f"{self.student_id} -> {self.course_id}"
+
+
+class ClassSession(models.Model):
+    class SessionType(models.TextChoices):
+        REGULAR = "regular", "Regular"
+        EXTRA = "extra", "Extra"
+
+    class Status(models.TextChoices):
+        SCHEDULED = "scheduled", "Scheduled"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="class_sessions")
+    faculty = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="class_sessions",
+        limit_choices_to={"role": "faculty"},
+    )
+    date = models.DateField()
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    session_type = models.CharField(max_length=10, choices=SessionType.choices, default=SessionType.REGULAR)
+    is_auto_generated = models.BooleanField(default=False)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.SCHEDULED)
+    note = models.CharField(max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_class_sessions",
+        limit_choices_to={"role__in": ["admin", "faculty"]},
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("course", "date", "start_time")
+        ordering = ["date", "start_time"]
+
+    def __str__(self):
+        return f"{self.course_id} | {self.date} {self.start_time}-{self.end_time}"

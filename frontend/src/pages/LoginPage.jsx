@@ -1,17 +1,18 @@
 import { useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
 
 export default function LoginPage() {
   const { user, login } = useAuth();
+  const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   if (user) {
-    return <Navigate to="/" replace />;
+    return <Navigate to={`/${location.search}`} replace />;
   }
 
   const onSubmit = async (e) => {

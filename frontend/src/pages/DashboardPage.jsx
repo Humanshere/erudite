@@ -22,7 +22,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
     }
     if (user.role === "faculty") {
       return [
-        { id: "attendance",  label: "Attendance",      icon: "✅" },
+        { id: "timetable",   label: "Timetable",       icon: "🗓️" },
       ];
     }
     return [
@@ -37,6 +37,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
       courses: "Course Allocation",
       enrollments: "Enrollment Management",
       attendance: "Mark Attendance",
+      timetable: "Class Timetable",
       overview: "My Attendance",
       history: "Attendance Log",
     };
@@ -49,6 +50,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
       courses: "Assign faculty and create new courses",
       enrollments: "Enroll students and manage course rosters",
       attendance: "Mark and save attendance by course and date",
+      timetable: "Auto schedule recurring classes and add extra sessions",
       overview: "Your attendance summary across all courses",
       history: "Full record of your past attendance",
     };
@@ -561,52 +563,153 @@ function AdminPanel({ activeSection }) {
 
 /* ─── FACULTY PANEL ─────────────────────────────────────────────── */
 
-function FacultyPanel() {
-  const [courses, setCourses] = useState([]);
-  const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
-  const [selectedCourse, setSelectedCourse] = useState("");
-  const [rows, setRows] = useState([]);
+function FacultyPanel({ initialSelection, onSelectionConsumed, onBackToTimetable }) {
+  const [selectedSession, setSelectedSession] = useState(null);
+  const [studentRows, setStudentRows] = useState([]);
+  const [qrDurationMinutes, setQrDurationMinutes] = useState(10);
+  const [activeQrSession, setActiveQrSession] = useState(null);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [nowMs, setNowMs] = useState(Date.now());
   const [message, setMessage] = useState({ text: "", type: "info" });
 
+  const refreshSessionRoster = async (sessionInfo, qrSessionInfo = activeQrSession) => {
+    if (!sessionInfo?.id) return;
+
+    const [enrollmentRes, attendanceRes] = await Promise.all([
+      client.get("/academics/enrollments/"),
+      client.get(`/attendance/records/?class_session=${sessionInfo.id}`),
+    ]);
+
+    const courseEnrollments = enrollmentRes.data.filter((e) => String(e.course) === String(sessionInfo.course));
+    const attendanceMap = new Map(attendanceRes.data.map((r) => [String(r.student), r.status]));
+
+    const mapped = courseEnrollments.map((e) => ({
+      student_id: e.student,
+      student_name: e.student_name,
+      student_email: e.student_email,
+      status: attendanceMap.get(String(e.student)) || "absent",
+    }));
+
+    setStudentRows(mapped);
+
+    if (qrSessionInfo?.id) {
+      const qrRes = await client.get(`/attendance/qr-sessions/${qrSessionInfo.id}/`);
+      setActiveQrSession((prev) => ({
+        ...(prev || {}),
+        ...qrRes.data,
+        qr_image: qrRes.data.qr_image || qrSessionInfo.qr_image || prev?.qr_image,
+      }));
+    }
+  };
+
+  const updateStudentStatus = (studentId, status) => {
+    setStudentRows((prev) => prev.map((row) => (
+      row.student_id === studentId ? { ...row, status } : row
+    )));
+  };
+
+  const saveManualAttendance = async () => {
+    if (!selectedSession?.id) {
+      setMessage({ text: "Open a class from timetable first.", type: "warning" });
+      return;
+    }
+
+    try {
+      await client.post("/attendance/records/mark-bulk/", {
+        course_id: Number(selectedSession.course),
+        class_session_id: Number(selectedSession.id),
+        date: selectedSession.date,
+        records: studentRows.map((row) => ({
+          student_id: row.student_id,
+          status: row.status,
+          remark: "Manually updated by faculty",
+        })),
+      });
+      await refreshSessionRoster(selectedSession);
+      setMessage({ text: "Manual attendance updates saved.", type: "success" });
+    } catch (err) {
+      setMessage({ text: err?.response?.data?.detail || "Could not save manual attendance.", type: "warning" });
+    }
+  };
+
   useEffect(() => {
-    client.get("/academics/courses/").then((res) => {
-      setCourses(res.data);
-      if (res.data.length > 0) setSelectedCourse(String(res.data[0].id));
-    });
+    if (!initialSelection) return;
+
+    const load = async () => {
+      if (!initialSelection.classSessionId) return;
+      const sessionRes = await client.get(`/academics/class-sessions/${initialSelection.classSessionId}/`);
+      setSelectedSession(sessionRes.data);
+      setActiveQrSession(null);
+      await refreshSessionRoster(sessionRes.data, null);
+      setMessage({ text: "Class loaded. Generate QR to start live attendance.", type: "info" });
+    };
+
+    load();
+
+    if (onSelectionConsumed) {
+      onSelectionConsumed();
+    }
+  }, [initialSelection]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
   }, []);
 
-  const loadStudents = async () => {
-    setMessage({ text: "", type: "info" });
-    const res = await client.get("/academics/enrollments/");
-    const filtered = res.data.filter((e) => String(e.course) === selectedCourse);
-    const map = filtered.map((e) => ({
-      student_id: e.student, student_name: e.student_name,
-      student_email: e.student_email, status: "present", remark: "",
-    }));
-    setRows(map);
-    if (map.length === 0) setMessage({ text: "No enrolled students for this course.", type: "warning" });
-  };
+  useEffect(() => {
+    if (!selectedSession?.id || !activeQrSession?.id) return;
+    const poll = setInterval(() => {
+      refreshSessionRoster(selectedSession);
+    }, 3000);
+    return () => clearInterval(poll);
+  }, [selectedSession, activeQrSession?.id]);
 
-  const markAttendance = async () => {
-    if (!selectedCourse || !date || rows.length === 0) {
-      setMessage({ text: "Select course, date, and load students first.", type: "warning" }); return;
+  const generateQrSession = async () => {
+    if (!selectedSession?.id) {
+      setMessage({ text: "Open a class from timetable first.", type: "warning" });
+      return;
     }
-    await client.post("/attendance/records/mark-bulk/", {
-      course_id: Number(selectedCourse), date, records: rows,
-    });
-    setMessage({ text: "Attendance saved successfully.", type: "success" });
+
+    try {
+      setQrBusy(true);
+      const res = await client.post("/attendance/qr-sessions/", {
+        class_session_id: Number(selectedSession.id),
+        duration_minutes: Number(qrDurationMinutes),
+      });
+      setActiveQrSession(res.data);
+      await refreshSessionRoster(selectedSession, res.data);
+      setMessage({ text: "QR session created. Students are premarked absent and will turn present on scan.", type: "success" });
+    } catch (err) {
+      setMessage({ text: err?.response?.data?.detail || "Could not generate QR session.", type: "warning" });
+    } finally {
+      setQrBusy(false);
+    }
   };
 
-  const updateStatus = (idx, status) =>
-    setRows((p) => p.map((r, i) => (i === idx ? { ...r, status } : r)));
+  const deactivateQrSession = async () => {
+    if (!activeQrSession?.id) return;
+    try {
+      setQrBusy(true);
+      await client.post(`/attendance/qr-sessions/${activeQrSession.id}/deactivate/`);
+      setActiveQrSession((p) => (p ? { ...p, is_active: false } : p));
+      if (selectedSession) {
+        await refreshSessionRoster(selectedSession);
+      }
+      setMessage({ text: "QR session deactivated.", type: "success" });
+    } catch (err) {
+      setMessage({ text: err?.response?.data?.detail || "Could not deactivate session.", type: "warning" });
+    } finally {
+      setQrBusy(false);
+    }
+  };
 
-  const presentCount = rows.filter((r) => r.status === "present").length;
-  const absentCount  = rows.filter((r) => r.status === "absent").length;
-  const lateCount    = rows.filter((r) => r.status === "late").length;
-  const selectedCourseLabel = courses.find((c) => String(c.id) === selectedCourse);
-
-  const statusClass = (s) =>
-    s === "present" ? "status-select-present" : s === "absent" ? "status-select-absent" : "status-select-late";
+  const presentCount = studentRows.filter((r) => r.status === "present").length;
+  const absentCount = studentRows.filter((r) => r.status === "absent").length;
+  const lateCount = studentRows.filter((r) => r.status === "late").length;
+  const remainingMs = activeQrSession ? Math.max(0, new Date(activeQrSession.ends_at).getTime() - nowMs) : 0;
+  const timerText = activeQrSession
+    ? `${Math.floor(remainingMs / 60000)}:${String(Math.floor((remainingMs % 60000) / 1000)).padStart(2, "0")}`
+    : "--:--";
 
   return (
     <div className="grid-gap">
@@ -614,8 +717,8 @@ function FacultyPanel() {
       <div className="stat-grid">
         <div className="stat-card teal">
           <span className="stat-icon">📚</span>
-          <span className="stat-label">Your Courses</span>
-          <strong className="stat-value">{courses.length}</strong>
+          <span className="stat-label">Class Session</span>
+          <strong className="stat-value">{selectedSession ? `${selectedSession.start_time}` : "-"}</strong>
         </div>
         <div className="stat-card green">
           <span className="stat-icon">✅</span>
@@ -624,8 +727,8 @@ function FacultyPanel() {
         </div>
         <div className="stat-card amber">
           <span className="stat-icon">⏰</span>
-          <span className="stat-label">Late</span>
-          <strong className="stat-value">{lateCount}</strong>
+          <span className="stat-label">QR Timer</span>
+          <strong className="stat-value">{timerText}</strong>
         </div>
         <div className="stat-card blue">
           <span className="stat-icon">❌</span>
@@ -637,35 +740,74 @@ function FacultyPanel() {
       <div className="panel">
         <div className="panel-header">
           <div>
-            <h3>Select Course &amp; Date</h3>
-            {selectedCourseLabel && (
-              <p>{selectedCourseLabel.code} — {selectedCourseLabel.title}</p>
-            )}
+            <h3>Live Class Attendance</h3>
+            {selectedSession && <p>{selectedSession.course_code} — {selectedSession.course_title} | {selectedSession.date} {selectedSession.start_time}-{selectedSession.end_time}</p>}
           </div>
+          <button type="button" className="btn-secondary" onClick={onBackToTimetable}>Back to Timetable</button>
         </div>
-        <div className="panel-body">
-          <div className="form-grid" style={{ gridTemplateColumns: "1fr 1fr auto" }}>
-            <div className="form-group">
-              <label>Course</label>
-              <select value={selectedCourse} onChange={(e) => setSelectedCourse(e.target.value)}>
-                {courses.map((c) => <option key={c.id} value={c.id}>{c.code} – {c.title}</option>)}
-              </select>
-            </div>
-            <div className="form-group">
-              <label>Date</label>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-            </div>
-            <div className="form-group" style={{ justifyContent: "flex-end" }}>
-              <label>&nbsp;</label>
-              <button type="button" className="btn-secondary" onClick={loadStudents}>Load Students</button>
-            </div>
+        {!selectedSession && (
+          <div className="panel-body">
+            <div className="alert alert-info">Open a class from Timetable to start live attendance.</div>
           </div>
-        </div>
+        )}
 
-        {rows.length > 0 && (
+        {selectedSession && (
           <>
+
             <div className="panel-header" style={{ borderTop: "1px solid var(--border)" }}>
-              <h3>Attendance Sheet</h3>
+              <div>
+                <h3>Live QR Session</h3>
+                <p>Generate QR, students are marked absent by default and become present on scan</p>
+              </div>
+            </div>
+            <div className="panel-body">
+              <div className="form-grid" style={{ gridTemplateColumns: "220px auto" }}>
+                <div className="form-group">
+                  <label>Window (minutes)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="240"
+                    value={qrDurationMinutes}
+                    onChange={(e) => setQrDurationMinutes(e.target.value)}
+                  />
+                </div>
+                <div className="form-group" style={{ justifyContent: "flex-end" }}>
+                  <label>&nbsp;</label>
+                  <div className="flex-row">
+                    <button type="button" className="btn-primary" onClick={generateQrSession} disabled={qrBusy}>
+                      {qrBusy ? "Generating..." : "Generate QR"}
+                    </button>
+                    {activeQrSession?.is_active && (
+                      <button type="button" className="btn-danger" onClick={deactivateQrSession} disabled={qrBusy}>
+                        Deactivate
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {activeQrSession && (
+                <div className="qr-session-card">
+                  <div>
+                    <img className="qr-image" src={activeQrSession.qr_image} alt="Attendance session QR" />
+                  </div>
+                  <div className="qr-session-meta">
+                    <h4>Session Token</h4>
+                    <p className="qr-token">{activeQrSession.token}</p>
+                    <p>
+                      Active from <strong>{new Date(activeQrSession.starts_at).toLocaleTimeString()}</strong> to <strong>{new Date(activeQrSession.ends_at).toLocaleTimeString()}</strong>
+                    </p>
+                    <p>
+                      Status: <span className={`badge ${activeQrSession.is_active ? "badge-green" : "badge-gray"}`}>{activeQrSession.is_active ? "Active" : "Inactive"}</span>
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ borderTop: "1px solid var(--border)" }}>
+              <h3>Live Student Status</h3>
               <div className="flex-row">
                 <span className="badge badge-green">{presentCount} present</span>
                 <span className="badge badge-amber">{lateCount} late</span>
@@ -683,7 +825,7 @@ function FacultyPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row, idx) => (
+                  {studentRows.map((row, idx) => (
                     <tr key={`${row.student_id}-${idx}`}>
                       <td className="td-muted">{idx + 1}</td>
                       <td><strong>{row.student_name}</strong></td>
@@ -691,8 +833,8 @@ function FacultyPanel() {
                       <td>
                         <select
                           value={row.status}
-                          className={statusClass(row.status)}
-                          onChange={(e) => updateStatus(idx, e.target.value)}
+                          onChange={(e) => updateStudentStatus(row.student_id, e.target.value)}
+                          className={row.status === "present" ? "status-select-present" : row.status === "late" ? "status-select-late" : "status-select-absent"}
                           style={{ maxWidth: 130 }}
                         >
                           <option value="present">Present</option>
@@ -702,14 +844,19 @@ function FacultyPanel() {
                       </td>
                     </tr>
                   ))}
+                  {studentRows.length === 0 && (
+                    <tr><td colSpan={4} style={{ color: "var(--text-muted)", textAlign: "center", padding: "24px" }}>No enrolled students found for this class.</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
-            <div className="panel-body">
-              <button type="button" className="btn-primary" onClick={markAttendance}>
-                💾 Save Attendance
-              </button>
-            </div>
+            {studentRows.length > 0 && (
+              <div className="panel-body" style={{ borderTop: "1px solid var(--border)" }}>
+                <button type="button" className="btn-primary" onClick={saveManualAttendance}>
+                  Save Manual Attendance
+                </button>
+              </div>
+            )}
           </>
         )}
 
@@ -723,14 +870,386 @@ function FacultyPanel() {
   );
 }
 
+function FacultyTimetablePanel({ onOpenAttendance }) {
+  const toLocalDateInputValue = (date) => {
+    const offsetMs = date.getTimezoneOffset() * 60000;
+    return new Date(date.getTime() - offsetMs).toISOString().split("T")[0];
+  };
+
+  const countMatchingDays = (startDateStr, endDateStr, weekdays) => {
+    if (!startDateStr || !endDateStr || !Array.isArray(weekdays) || weekdays.length === 0) return 0;
+
+    const start = new Date(`${startDateStr}T00:00:00`);
+    const end = new Date(`${endDateStr}T00:00:00`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return 0;
+
+    let current = new Date(start);
+    let matched = 0;
+    while (current <= end) {
+      const jsDay = current.getDay();
+      const pythonDay = (jsDay + 6) % 7;
+      if (weekdays.includes(pythonDay)) matched += 1;
+      current.setDate(current.getDate() + 1);
+    }
+    return matched;
+  };
+
+  const today = new Date();
+  const monthAhead = new Date();
+  monthAhead.setDate(monthAhead.getDate() + 30);
+
+  const [courses, setCourses] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [hideUnscheduled, setHideUnscheduled] = useState(false);
+  const [message, setMessage] = useState({ text: "", type: "info" });
+
+  const [autoForm, setAutoForm] = useState({
+    course_id: "",
+    start_date: toLocalDateInputValue(today),
+    end_date: toLocalDateInputValue(monthAhead),
+    weekdays: [0, 1, 2, 3, 4],
+    start_time: "09:00",
+    end_time: "10:00",
+    replace_existing: false,
+  });
+
+  const [extraForm, setExtraForm] = useState({
+    course: "",
+    date: new Date().toISOString().split("T")[0],
+    start_time: "10:00",
+    end_time: "11:00",
+    note: "",
+  });
+
+  const weekdayChoices = [
+    { value: 0, label: "Mon" },
+    { value: 1, label: "Tue" },
+    { value: 2, label: "Wed" },
+    { value: 3, label: "Thu" },
+    { value: 4, label: "Fri" },
+    { value: 5, label: "Sat" },
+    { value: 6, label: "Sun" },
+  ];
+
+  const loadData = async () => {
+    const [courseRes, sessionRes] = await Promise.all([
+      client.get("/academics/courses/"),
+      client.get("/academics/class-sessions/"),
+    ]);
+
+    setCourses(courseRes.data);
+    setSessions(sessionRes.data);
+
+    if (courseRes.data.length > 0) {
+      const first = String(courseRes.data[0].id);
+      setAutoForm((p) => ({ ...p, course_id: p.course_id || first }));
+      setExtraForm((p) => ({ ...p, course: p.course || first }));
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const toggleWeekday = (day) => {
+    setAutoForm((p) => {
+      const exists = p.weekdays.includes(day);
+      const next = exists ? p.weekdays.filter((d) => d !== day) : [...p.weekdays, day];
+      return { ...p, weekdays: next.sort((a, b) => a - b) };
+    });
+  };
+
+  const submitAutoSchedule = async () => {
+    if (!autoForm.course_id || autoForm.weekdays.length === 0) {
+      setMessage({ text: "Select a course and at least one weekday.", type: "warning" });
+      return;
+    }
+
+    const matchedDays = countMatchingDays(autoForm.start_date, autoForm.end_date, autoForm.weekdays);
+    if (matchedDays === 0) {
+      setMessage({
+        text: "No selected weekday falls inside this date range. Adjust date range or weekday chips.",
+        type: "warning",
+      });
+      return;
+    }
+
+    try {
+      const payload = {
+        ...autoForm,
+        course_id: Number(autoForm.course_id),
+      };
+      const res = await client.post("/academics/class-sessions/auto-schedule/", payload);
+      const created = Number(res.data.created || 0);
+      const updated = Number(res.data.updated || 0);
+      const skipped = Number(res.data.skipped || 0);
+      if (created + updated === 0) {
+        setMessage({
+          text: `No classes were scheduled. ${matchedDays} matching day(s) were checked and ${skipped} slot(s) were skipped. Enable Replace Existing if needed.`,
+          type: "warning",
+        });
+      } else {
+        setMessage({ text: `Auto schedule complete: ${created} created, ${updated} updated, ${skipped} skipped.`, type: "success" });
+      }
+      await loadData();
+    } catch (err) {
+      setMessage({ text: err?.response?.data?.detail || "Could not auto schedule classes.", type: "warning" });
+    }
+  };
+
+  const submitExtraClass = async () => {
+    if (!extraForm.course || !extraForm.date || !extraForm.start_time || !extraForm.end_time) {
+      setMessage({ text: "Fill all required fields for extra class.", type: "warning" });
+      return;
+    }
+
+    try {
+      await client.post("/academics/class-sessions/", {
+        course: Number(extraForm.course),
+        date: extraForm.date,
+        start_time: extraForm.start_time,
+        end_time: extraForm.end_time,
+        session_type: "extra",
+        note: extraForm.note,
+      });
+      setMessage({ text: "Extra class scheduled.", type: "success" });
+      setExtraForm((p) => ({ ...p, note: "" }));
+      await loadData();
+    } catch (err) {
+      setMessage({ text: err?.response?.data?.detail || "Could not schedule extra class.", type: "warning" });
+    }
+  };
+
+  const unscheduleClass = async (sessionId) => {
+    try {
+      await client.post(`/academics/class-sessions/${sessionId}/unschedule/`, {});
+      setMessage({ text: "Class unscheduled.", type: "success" });
+      await loadData();
+    } catch (err) {
+      setMessage({ text: err?.response?.data?.detail || "Could not unschedule class.", type: "warning" });
+    }
+  };
+
+  const visibleSessions = hideUnscheduled
+    ? sessions.filter((s) => s.status !== "cancelled")
+    : sessions;
+
+  return (
+    <div className="grid-gap">
+      {message.text && <div className={`alert alert-${message.type}`}>{message.text}</div>}
+
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <h3>Auto Schedule Recurring Classes</h3>
+            <p>Create regular sessions across a date range</p>
+          </div>
+        </div>
+        <div className="panel-body">
+          <div className="form-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+            <div className="form-group">
+              <label>Course</label>
+              <select value={autoForm.course_id} onChange={(e) => setAutoForm((p) => ({ ...p, course_id: e.target.value }))}>
+                <option value="">Select Course</option>
+                {courses.map((c) => <option key={c.id} value={c.id}>{c.code} - {c.title}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Start Date</label>
+              <input type="date" value={autoForm.start_date} onChange={(e) => setAutoForm((p) => ({ ...p, start_date: e.target.value }))} />
+            </div>
+            <div className="form-group">
+              <label>End Date</label>
+              <input type="date" value={autoForm.end_date} onChange={(e) => setAutoForm((p) => ({ ...p, end_date: e.target.value }))} />
+            </div>
+            <div className="form-group">
+              <label>Start Time</label>
+              <input type="time" value={autoForm.start_time} onChange={(e) => setAutoForm((p) => ({ ...p, start_time: e.target.value }))} />
+            </div>
+            <div className="form-group">
+              <label>End Time</label>
+              <input type="time" value={autoForm.end_time} onChange={(e) => setAutoForm((p) => ({ ...p, end_time: e.target.value }))} />
+            </div>
+            <div className="form-group" style={{ justifyContent: "flex-end" }}>
+              <label>&nbsp;</label>
+              <button type="button" className="btn-primary" onClick={submitAutoSchedule}>Auto Schedule</button>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>Repeat On</label>
+            <div className="flex-row">
+              {weekdayChoices.map((d) => (
+                <button
+                  key={d.value}
+                  type="button"
+                  className={autoForm.weekdays.includes(d.value) ? "btn-chip active" : "btn-chip"}
+                  onClick={() => toggleWeekday(d.value)}
+                >
+                  {d.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-muted)" }}>
+              <input
+                type="checkbox"
+                checked={autoForm.replace_existing}
+                onChange={(e) => setAutoForm((p) => ({ ...p, replace_existing: e.target.checked }))}
+              />
+              Replace existing sessions at same date and start time
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <h3>Schedule Extra Class</h3>
+            <p>Add one-off manual classes outside regular schedule</p>
+          </div>
+        </div>
+        <div className="panel-body">
+          <div className="form-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
+            <div className="form-group">
+              <label>Course</label>
+              <select value={extraForm.course} onChange={(e) => setExtraForm((p) => ({ ...p, course: e.target.value }))}>
+                <option value="">Select Course</option>
+                {courses.map((c) => <option key={c.id} value={c.id}>{c.code} - {c.title}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Date</label>
+              <input type="date" value={extraForm.date} onChange={(e) => setExtraForm((p) => ({ ...p, date: e.target.value }))} />
+            </div>
+            <div className="form-group">
+              <label>Start Time</label>
+              <input type="time" value={extraForm.start_time} onChange={(e) => setExtraForm((p) => ({ ...p, start_time: e.target.value }))} />
+            </div>
+            <div className="form-group">
+              <label>End Time</label>
+              <input type="time" value={extraForm.end_time} onChange={(e) => setExtraForm((p) => ({ ...p, end_time: e.target.value }))} />
+            </div>
+          </div>
+          <div className="form-group" style={{ marginTop: 10 }}>
+            <label>Note (optional)</label>
+            <input type="text" value={extraForm.note} onChange={(e) => setExtraForm((p) => ({ ...p, note: e.target.value }))} placeholder="e.g. Revision class" />
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <button type="button" className="btn-secondary" onClick={submitExtraClass}>Add Extra Class</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <h3>Scheduled Classes</h3>
+          <div className="flex-row">
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-muted)" }}>
+              <input
+                type="checkbox"
+                checked={hideUnscheduled}
+                onChange={(e) => setHideUnscheduled(e.target.checked)}
+              />
+              Hide unscheduled classes
+            </label>
+            <span className="badge badge-gray">{visibleSessions.length} shown</span>
+          </div>
+        </div>
+        <div className="table-wrap" style={{ borderRadius: 0, border: "none", borderTop: "1px solid var(--border)" }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Course</th>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Note</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleSessions.map((s) => (
+                <tr
+                  key={s.id}
+                  onClick={() => {
+                    if (s.status === "cancelled") return;
+                    if (onOpenAttendance) {
+                      onOpenAttendance({
+                        courseId: s.course,
+                        classSessionId: s.id,
+                        date: s.date,
+                      });
+                    }
+                  }}
+                  style={{ cursor: s.status === "cancelled" ? "default" : "pointer" }}
+                >
+                  <td className="td-muted">{s.date}</td>
+                  <td>
+                    <strong>{s.course_code}</strong>
+                    <div className="td-muted">{s.course_title}</div>
+                  </td>
+                  <td className="td-muted">{s.start_time} - {s.end_time}</td>
+                  <td>
+                    <span className={`badge ${s.session_type === "extra" ? "badge-amber" : "badge-blue"}`} style={{ textTransform: "capitalize" }}>
+                      {s.session_type}
+                    </span>
+                  </td>
+                  <td>
+                    <span className={`badge ${s.status === "scheduled" ? "badge-green" : s.status === "completed" ? "badge-blue" : "badge-rose"}`} style={{ textTransform: "capitalize" }}>
+                      {s.status}
+                    </span>
+                  </td>
+                  <td className="td-muted">{s.note || "-"}</td>
+                  <td>
+                    {s.status === "scheduled" ? (
+                      <button
+                        type="button"
+                        className="btn-danger btn-sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          unscheduleClass(s.id);
+                        }}
+                      >
+                        Unschedule
+                      </button>
+                    ) : (
+                      <span className="td-muted">-</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {visibleSessions.length === 0 && (
+                <tr><td colSpan={7} style={{ color: "var(--text-muted)", textAlign: "center", padding: "24px" }}>No class sessions scheduled yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── STUDENT PANEL ─────────────────────────────────────────────── */
 
 function StudentPanel({ activeSection }) {
   const [records, setRecords] = useState([]);
+  const [scanToken, setScanToken] = useState("");
+  const [scanBusy, setScanBusy] = useState(false);
+  const [message, setMessage] = useState({ text: "", type: "info" });
 
   useEffect(() => {
     client.get("/attendance/records/").then((res) => setRecords(res.data));
   }, []);
+
+  const refreshRecords = async () => {
+    const res = await client.get("/attendance/records/");
+    setRecords(res.data);
+  };
 
   const summary = useMemo(() => {
     const total = records.length;
@@ -763,6 +1282,11 @@ function StudentPanel({ activeSection }) {
   if (activeSection === "overview") {
     return (
       <div className="grid-gap">
+        {message.text && (
+          <div className={`alert alert-${message.type}`}>{message.text}</div>
+        )}
+
+        
         {/* Summary stats */}
         <div className="stat-grid">
           <div className="stat-card blue">
@@ -850,44 +1374,49 @@ function StudentPanel({ activeSection }) {
 
   // history section
   return (
-    <div className="panel">
-      <div className="panel-header">
-        <h3>Full Attendance Log</h3>
-        <span className="badge badge-gray">{records.length} records</span>
-      </div>
-      <div className="table-wrap" style={{ borderRadius: 0, border: "none", borderTop: "1px solid var(--border)" }}>
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Course</th>
-              <th>Status</th>
-              <th>Remark</th>
-            </tr>
-          </thead>
-          <tbody>
-            {records.map((r) => (
-              <tr key={r.id}>
-                <td className="td-muted">{r.date}</td>
-                <td>
-                  {r.course_code
-                    ? <><strong>{r.course_code}</strong><div className="td-muted">{r.course_title}</div></>
-                    : r.course}
-                </td>
-                <td>
-                  <span className={`badge badge-${r.status === "present" ? "green" : r.status === "late" ? "amber" : "rose"}`}
-                    style={{ textTransform: "capitalize" }}>
-                    {r.status}
-                  </span>
-                </td>
-                <td className="td-muted">{r.remark || "—"}</td>
+    <div className="grid-gap">
+      {message.text && (
+        <div className={`alert alert-${message.type}`}>{message.text}</div>
+      )}
+      <div className="panel">
+        <div className="panel-header">
+          <h3>Full Attendance Log</h3>
+          <span className="badge badge-gray">{records.length} records</span>
+        </div>
+        <div className="table-wrap" style={{ borderRadius: 0, border: "none", borderTop: "1px solid var(--border)" }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Course</th>
+                <th>Status</th>
+                <th>Remark</th>
               </tr>
-            ))}
-            {records.length === 0 && (
-              <tr><td colSpan={4} style={{ color: "var(--text-muted)", textAlign: "center", padding: "24px" }}>No attendance data available.</td></tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr key={r.id}>
+                  <td className="td-muted">{r.date}</td>
+                  <td>
+                    {r.course_code
+                      ? <><strong>{r.course_code}</strong><div className="td-muted">{r.course_title}</div></>
+                      : r.course}
+                  </td>
+                  <td>
+                    <span className={`badge badge-${r.status === "present" ? "green" : r.status === "late" ? "amber" : "rose"}`}
+                      style={{ textTransform: "capitalize" }}>
+                      {r.status}
+                    </span>
+                  </td>
+                  <td className="td-muted">{r.remark || "—"}</td>
+                </tr>
+              ))}
+              {records.length === 0 && (
+                <tr><td colSpan={4} style={{ color: "var(--text-muted)", textAlign: "center", padding: "24px" }}>No attendance data available.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -900,16 +1429,31 @@ export default function DashboardPage() {
 
   const defaultNav = useMemo(() => {
     if (user.role === "admin") return "users";
-    if (user.role === "faculty") return "attendance";
+    if (user.role === "faculty") return "timetable";
     return "overview";
   }, [user.role]);
 
   const [activeNav, setActiveNav] = useState(defaultNav);
+  const [facultyAttendanceSelection, setFacultyAttendanceSelection] = useState(null);
+
+  const openFacultyAttendanceFromSession = (selection) => {
+    setFacultyAttendanceSelection(selection);
+    setActiveNav("attendance");
+  };
 
   return (
     <AppShell user={user} logout={logout} activeNav={activeNav} setActiveNav={setActiveNav}>
       {user.role === "admin" && <AdminPanel activeSection={activeNav} />}
-      {user.role === "faculty" && <FacultyPanel />}
+      {user.role === "faculty" && activeNav === "attendance" && (
+        <FacultyPanel
+          initialSelection={facultyAttendanceSelection}
+          onSelectionConsumed={() => setFacultyAttendanceSelection(null)}
+          onBackToTimetable={() => setActiveNav("timetable")}
+        />
+      )}
+      {user.role === "faculty" && activeNav === "timetable" && (
+        <FacultyTimetablePanel onOpenAttendance={openFacultyAttendanceFromSession} />
+      )}
       {user.role === "student" && <StudentPanel activeSection={activeNav} />}
     </AppShell>
   );

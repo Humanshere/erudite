@@ -35,6 +35,7 @@ This is the initial MVP scaffold based on your selected features:
    - `python manage.py createsuperuser`
 8. Run backend:
    - `python manage.py runserver`
+   - or, for access from a phone or emulator on the same network, set `DJANGO_RUNSERVER_ADDR=0.0.0.0:8000` and include your laptop's hotspot IP in `DJANGO_ALLOWED_HOSTS`
 
 Backend URL: `http://127.0.0.1:8000`
 
