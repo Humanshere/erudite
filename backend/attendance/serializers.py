@@ -25,6 +25,10 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
             "date",
             "status",
             "remark",
+            "latitude",
+            "longitude",
+            "accuracy",
+            "selfie",
         )
 
 
@@ -87,3 +91,7 @@ class AttendanceQrSessionSerializer(serializers.ModelSerializer):
 
 class AttendanceQrScanSerializer(serializers.Serializer):
     token = serializers.UUIDField()
+    latitude = serializers.FloatField(required=True)
+    longitude = serializers.FloatField(required=True)
+    accuracy = serializers.FloatField(required=False, allow_null=True)
+    selfie = serializers.ImageField(required=True)

@@ -274,6 +274,13 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         token = serializer.validated_data["token"]
 
+        # Enforce mandatory anti-proxy fields
+        if "latitude" not in serializer.validated_data or "longitude" not in serializer.validated_data:
+            return Response({"detail": "Location (latitude and longitude) is required."}, status=status.HTTP_400_BAD_REQUEST)
+        has_selfie = "selfie" in serializer.validated_data or request.FILES.get("selfie")
+        if not has_selfie:
+            return Response({"detail": "Selfie image is required."}, status=status.HTTP_400_BAD_REQUEST)
+
         session = (
             AttendanceQrSession.objects.select_related("course", "class_session", "created_by")
             .filter(token=token)
@@ -317,6 +324,31 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
                 "marked_by": session.created_by,
             },
         )
+
+        # Save optional location/selfie metadata if provided
+        latitude = serializer.validated_data.get("latitude")
+        longitude = serializer.validated_data.get("longitude")
+        accuracy = serializer.validated_data.get("accuracy")
+        selfie = serializer.validated_data.get("selfie") if "selfie" in serializer.validated_data else None
+        # uploaded files may also appear in request.FILES
+        if not selfie and request.FILES.get("selfie"):
+            selfie = request.FILES.get("selfie")
+
+        dirty = False
+        if latitude is not None:
+            record.latitude = latitude
+            dirty = True
+        if longitude is not None:
+            record.longitude = longitude
+            dirty = True
+        if accuracy is not None:
+            record.accuracy = accuracy
+            dirty = True
+        if selfie is not None:
+            record.selfie = selfie
+            dirty = True
+        if dirty:
+            record.save()
 
         return Response(
             {

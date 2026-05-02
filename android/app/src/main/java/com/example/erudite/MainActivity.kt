@@ -59,6 +59,17 @@ import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.Executors
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
+
+class CameraController(val captureSelfie: suspend () -> ByteArray?)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -217,6 +228,7 @@ private fun ScannerScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var cameraController by remember { mutableStateOf<CameraController?>(null) }
 
     var cameraPermissionGranted by remember {
         mutableStateOf(
@@ -224,10 +236,23 @@ private fun ScannerScreen(
                 android.content.pm.PackageManager.PERMISSION_GRANTED,
         )
     }
-    val permissionLauncher = rememberLauncherForActivityResult(
+    var locationPermissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED,
+        )
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         cameraPermissionGranted = granted
+    }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        locationPermissionGranted = granted
     }
 
     var statusText by remember { mutableStateOf("Point camera at class QR code") }
@@ -254,7 +279,36 @@ private fun ScannerScreen(
                 return@launch
             }
 
-            val result = repo.scanAttendance(token)
+            // Attempt to get last known location (best-effort). Requires location permission.
+            var lat: Double? = null
+            var lon: Double? = null
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                try {
+                    val lm = context.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+                    val l = lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
+                        ?: lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
+                    if (l != null) {
+                        lat = l.latitude
+                        lon = l.longitude
+                    }
+                } catch (ex: Exception) {
+                    Log.w("EruditeScanner", "Could not fetch last known location", ex)
+                }
+            } else {
+                statusText = "Location permission not granted; tap to allow."
+            }
+
+            // Capture selfie (front camera) if controller available; this will briefly switch cameras.
+            var selfieBytes: ByteArray? = null
+            try {
+                selfieBytes = cameraController?.captureSelfie()
+            } catch (ex: Exception) {
+                Log.w("EruditeScanner", "Selfie capture failed", ex)
+            }
+
+            val result = repo.scanAttendance(token, lat, lon, selfieBytes)
             statusText = if (result.isSuccess) {
                 result.getOrNull()?.detail ?: "Attendance marked."
             } else {
@@ -289,12 +343,24 @@ private fun ScannerScreen(
                     modifier = Modifier.padding(top = 16.dp),
                 )
                 Button(
-                    onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                    onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
                     modifier = Modifier.padding(top = 8.dp),
                 ) {
                     Text("Grant Camera Permission")
                 }
             } else {
+                if (!locationPermissionGranted) {
+                    Text(
+                        "Location permission is required to include your location with the scan.",
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                    Button(
+                        onClick = { locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
+                        modifier = Modifier.padding(top = 8.dp),
+                    ) {
+                        Text("Grant Location Permission")
+                    }
+                }
                 CameraQrScanner(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -302,6 +368,7 @@ private fun ScannerScreen(
                         .padding(top = 16.dp),
                     lifecycleOwner = lifecycleOwner,
                     onDetected = onDetected,
+                    onControllerReady = { cameraController = it },
                 )
             }
 
@@ -323,6 +390,7 @@ private fun CameraQrScanner(
     modifier: Modifier,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     onDetected: (String) -> Unit,
+    onControllerReady: (CameraController) -> Unit = {},
 ) {
     val context = LocalContext.current
     val options = remember {
@@ -340,22 +408,21 @@ private fun CameraQrScanner(
 
             cameraProviderFuture.addListener({
                 val cameraProvider = cameraProviderFuture.get()
-                val preview = androidx.camera.core.Preview.Builder().build().also {
+                var preview = androidx.camera.core.Preview.Builder().build().also {
                     it.surfaceProvider = previewView.surfaceProvider
                 }
 
-                val analysis = ImageAnalysis.Builder()
+                var analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
-                analysis.setAnalyzer(
-                    ContextCompat.getMainExecutor(ctx),
-                    object : ImageAnalysis.Analyzer {
-                        override fun analyze(imageProxy: ImageProxy) {
-                            processImageProxy(scanner, imageProxy, onDetected)
-                        }
-                    },
-                )
+                val analyzer = object : ImageAnalysis.Analyzer {
+                    override fun analyze(imageProxy: ImageProxy) {
+                        processImageProxy(scanner, imageProxy, onDetected)
+                    }
+                }
+
+                analysis.setAnalyzer(ContextCompat.getMainExecutor(ctx), analyzer)
 
                 try {
                     cameraProvider.unbindAll()
@@ -368,6 +435,81 @@ private fun CameraQrScanner(
                 } catch (ex: Exception) {
                     Log.e("EruditeScanner", "Camera bind failed", ex)
                 }
+
+                // Controller: capture selfie by briefly switching to front camera and using ImageCapture
+                val controller = CameraController(captureSelfie = suspendCoroutine { cont ->
+                    val mainExec = ContextCompat.getMainExecutor(ctx)
+                    try {
+                        val imageCapture = androidx.camera.core.ImageCapture.Builder().build()
+                        // Bind front camera for capture
+                        try {
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, imageCapture)
+                        } catch (bindEx: Exception) {
+                            cont.resumeWithException(bindEx)
+                            return@suspendCoroutine
+                        }
+
+                        val tmpFile = java.io.File(ctx.cacheDir, "selfie_${System.currentTimeMillis()}.jpg")
+                        val outputOptions = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(tmpFile).build()
+                        imageCapture.takePicture(outputOptions, mainExec, object : androidx.camera.core.ImageCapture.OnImageSavedCallback {
+                            override fun onImageSaved(outputFileResults: androidx.camera.core.ImageCapture.OutputFileResults) {
+                                try {
+                                    val bytes = tmpFile.readBytes()
+                                    // Rebind back camera preview and analysis
+                                    try {
+                                        preview = androidx.camera.core.Preview.Builder().build().also {
+                                            it.surfaceProvider = previewView.surfaceProvider
+                                        }
+                                        analysis = ImageAnalysis.Builder()
+                                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                            .build()
+                                        analysis.setAnalyzer(ContextCompat.getMainExecutor(ctx), analyzer)
+                                        cameraProvider.unbindAll()
+                                        cameraProvider.bindToLifecycle(
+                                            lifecycleOwner,
+                                            CameraSelector.DEFAULT_BACK_CAMERA,
+                                            preview,
+                                            analysis,
+                                        )
+                                    } catch (rebindEx: Exception) {
+                                        Log.e("EruditeScanner", "Failed to rebind back camera", rebindEx)
+                                    }
+                                    cont.resume(bytes)
+                                } catch (e: Exception) {
+                                    cont.resumeWithException(e)
+                                }
+                            }
+
+                            override fun onError(exception: androidx.camera.core.ImageCaptureException) {
+                                // Attempt to rebind back camera
+                                try {
+                                    preview = androidx.camera.core.Preview.Builder().build().also {
+                                        it.surfaceProvider = previewView.surfaceProvider
+                                    }
+                                    analysis = ImageAnalysis.Builder()
+                                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                        .build()
+                                    analysis.setAnalyzer(ContextCompat.getMainExecutor(ctx), analyzer)
+                                    cameraProvider.unbindAll()
+                                    cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        CameraSelector.DEFAULT_BACK_CAMERA,
+                                        preview,
+                                        analysis,
+                                    )
+                                } catch (rebindEx: Exception) {
+                                    Log.e("EruditeScanner", "Failed to rebind after capture error", rebindEx)
+                                }
+                                cont.resumeWithException(exception)
+                            }
+                        })
+                    } catch (e: Exception) {
+                        cont.resumeWithException(e)
+                    }
+                })
+
+                onControllerReady(controller)
             }, ContextCompat.getMainExecutor(ctx))
 
             previewView
@@ -406,7 +548,7 @@ private fun extractToken(rawValue: String): String {
 
 private data class LoginRequest(val email: String, val password: String)
 private data class LoginResponse(val access: String, val refresh: String)
-private data class ScanRequest(val token: String)
+private data class ScanRequest(val token: String, val latitude: Double? = null, val longitude: Double? = null)
 private data class ScanResponse(val detail: String)
 private data class RefreshRequest(val refresh: String)
 private data class RefreshResponse(val access: String)
@@ -456,14 +598,14 @@ private class StudentAttendanceRepository(context: Context) {
             level = HttpLoggingInterceptor.Level.BODY
         }
 
-        val client = OkHttpClient.Builder()
+        val rawClient = OkHttpClient.Builder()
             .addInterceptor(authInterceptor)
             .addInterceptor(logging)
             .build()
 
         val retrofit = Retrofit.Builder()
             .baseUrl(BASE_URL)
-            .client(client)
+            .client(rawClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
 
@@ -491,12 +633,49 @@ private class StudentAttendanceRepository(context: Context) {
         return if (refreshed) fetchMe() else null
     }
 
-    suspend fun scanAttendance(token: String): Result<ScanResponse> {
+    suspend fun scanAttendance(token: String, latitude: Double? = null, longitude: Double? = null): Result<ScanResponse> {
         return runCatching {
-            api.scan(ScanRequest(token = token))
+            api.scan(ScanRequest(token = token, latitude = latitude, longitude = longitude))
         }.recoverCatching {
             if (refreshAccessToken()) {
-                api.scan(ScanRequest(token = token))
+                api.scan(ScanRequest(token = token, latitude = latitude, longitude = longitude))
+            } else {
+                throw it
+            }
+        }
+    }
+
+    suspend fun scanAttendance(token: String, latitude: Double? = null, longitude: Double? = null, selfie: ByteArray? = null): Result<ScanResponse> {
+        return runCatching {
+            val url = BASE_URL + "attendance/qr-sessions/scan/"
+            val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
+            builder.addFormDataPart("token", token)
+            if (latitude != null) builder.addFormDataPart("latitude", latitude.toString())
+            if (longitude != null) builder.addFormDataPart("longitude", longitude.toString())
+            var tmpFile: java.io.File? = null
+            if (selfie != null) {
+                tmpFile = java.io.File.createTempFile("selfie", ".jpg", context.cacheDir)
+                tmpFile.outputStream().use { it.write(selfie) }
+                val mediaType = "image/jpeg".toMediaTypeOrNull()
+                builder.addFormDataPart("selfie", "selfie.jpg", tmpFile.asRequestBody(mediaType))
+            }
+
+            val requestBody = builder.build()
+            val requestBuilder = Request.Builder().url(url).post(requestBody)
+            val tokenHeader = accessToken
+            if (!tokenHeader.isNullOrBlank()) {
+                requestBuilder.addHeader("Authorization", "Bearer $tokenHeader")
+            }
+
+            val req = requestBuilder.build()
+            val resp = rawClient.newCall(req).execute()
+            val body = resp.body?.string() ?: throw Exception("Empty response")
+            if (!resp.isSuccessful) throw Exception("Scan failed: $body")
+            val gson = com.google.gson.Gson()
+            gson.fromJson(body, ScanResponse::class.java)
+        }.recoverCatching {
+            if (refreshAccessToken()) {
+                scanAttendance(token, latitude, longitude, selfie)
             } else {
                 throw it
             }
@@ -524,6 +703,6 @@ private class StudentAttendanceRepository(context: Context) {
 
     companion object {
         // Android emulator localhost mapping. Use your machine IP for physical devices.
-        private const val BASE_URL = "http://10.0.2.2:8000/api/"
+        private const val BASE_URL = "http://172.20.10.9:8000/api/"
     }
 }

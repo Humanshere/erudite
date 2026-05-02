@@ -38,6 +38,10 @@ class AttendanceRecord(models.Model):
     date = models.DateField()
     status = models.CharField(max_length=12, choices=Status.choices)
     remark = models.CharField(max_length=255, blank=True)
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+    accuracy = models.FloatField(null=True, blank=True)
+    selfie = models.ImageField(upload_to="attendance_selfies/", null=True, blank=True)
 
     class Meta:
         ordering = ["-date", "course_id", "class_session_id", "student_id"]
