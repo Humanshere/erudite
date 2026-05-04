@@ -1,94 +1,107 @@
-# University Management System (Django + React + MySQL)
+# University Management System
 
-This is the initial MVP scaffold based on your selected features:
-- Role-based auth (admin/faculty/student)
-- Profile-aware dashboard
-- Academic setup models (department, semester, course, enrollment)
-- Faculty attendance marking (bulk)
-- Student attendance viewing
+## Project Overview
+The University Management System is a comprehensive platform designed to streamline academic operations, encompassing role-based access control, academic structuring, and attendance tracking. It provides a cohesive environment where administrators, faculty, and students can interact with and manage academic data efficiently. The system is designed to support both web and mobile interfaces.
 
-## Project Structure
-- `backend/` Django REST API
-- `frontend/` React app (Vite)
-- `features.md` feature checklist
+## Tech Stack Used
+### Backend
+- **Framework:** Django, Django REST Framework
+- **Database:** MariaDB / MySQL
+- **Authentication:** JWT (JSON Web Tokens)
+- **Language:** Python 3
 
-## Backend Setup
-1. Go to backend:
-   - `cd backend`
-2. Create and activate virtual environment:
-   - `python3 -m venv .venv`
-   - `source .venv/bin/activate`
-3. Install dependencies:
-   - `pip install -r requirements.txt`
-4. Create `.env` from `.env.example` and update MySQL credentials.
-5. If your local MariaDB user cannot create new DBs, use an existing writable DB (example used in this setup: `test`).
-6. For local socket-based MariaDB setups, use:
-   - `MYSQL_HOST=localhost`
-   - `MYSQL_PORT=`
-   - `MYSQL_DB=test` (or your writable DB)
-   - `MYSQL_USER=<your_user>`
-   - `MYSQL_PASSWORD=<your_password_or_empty>`
-6. Run migrations:
-   - `python manage.py makemigrations`
-   - `python manage.py migrate`
-7. Create admin user:
-   - `python manage.py createsuperuser`
-8. Run backend:
-   - `python manage.py runserver`
-   - or, for access from a phone or emulator on the same network, set `DJANGO_RUNSERVER_ADDR=0.0.0.0:8000` and include your laptop's hotspot IP in `DJANGO_ALLOWED_HOSTS`
+### Frontend (Web)
+- **Framework:** React
+- **Build Tool:** Vite
+- **Language:** JavaScript (JSX)
 
-Backend URL: `http://127.0.0.1:8000`
+### Mobile Application
+- **Platform:** Android
+- **Language:** Kotlin
+- **Build Tool:** Gradle
 
-## Frontend Setup
-1. Go to frontend:
-   - `cd frontend`
-2. Install dependencies:
-   - `npm install`
-3. Run frontend:
-   - `npm run dev`
+## Features and Functionality
+- **Role-Based Authentication:** Dedicated portals and access levels tailored for Administrators, Faculty, and Students.
+- **Academic Structure Management:** Administration interfaces for managing Departments, Semesters, Courses, and Enrollments.
+- **Attendance Management System:**
+  - Bulk attendance marking capabilities for faculty.
+  - QR Code or location-based attendance sessions.
+  - Individual student attendance tracking and reporting.
+  - Facial recognition and selfie benchmarks for attendance validation.
+- **Integrated Chatbot:** Support module built into the platform to handle general queries and assistance.
+- **Profile Management:** Profile-aware dashboard rendering specific insights according to the logged-in user role.
+- **Cross-Platform Accessibility:** REST API infrastructure enabling interaction across web frontends and Android mobile applications.
 
-Frontend URL: `http://127.0.0.1:5173`
+## Steps to Run the Project
 
-## Seeded Demo Data (Current Local Setup)
-These demo users were seeded and verified:
-- Admin: `admin@ums.local` / `Admin@12345`
-- Faculty: `faculty@ums.local` / `Faculty@12345`
-- Student: `student@ums.local` / `Student@12345`
+### Database Requirements
+1. Ensure MariaDB or MySQL is installed and running on your local machine.
+2. Create a writable database (e.g., `test` or `ums_db`).
 
-Seeded sample academic data:
-- Department: `CSE`
-- Semester: `Spring 2026`
-- Course: `CSE101 - Intro to Programming`
-- Enrollment: student enrolled in `CSE101`
-- Attendance records: 3 entries for the sample student
+### Backend Setup
+1. Open a terminal and navigate to the backend directory:
+   ```bash
+   cd backend
+   ```
+2. Create and activate a Python virtual environment:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+3. Install backend dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Configure environment variables:
+   - Create a `.env` file from the `.env.example` file (if available) or set the required variables.
+   - Example Database configuration for a local socket-based setup:
+     ```
+     MYSQL_HOST=localhost
+     MYSQL_PORT=
+     MYSQL_DB=test
+     MYSQL_USER=<your_user>
+     MYSQL_PASSWORD=<your_password_or_empty>
+     ```
+5. Apply database migrations:
+   ```bash
+   python manage.py makemigrations
+   python manage.py migrate
+   ```
+6. Create an application administrator account:
+   ```bash
+   python manage.py createsuperuser
+   ```
+7. Start the backend server:
+   ```bash
+   python manage.py runserver
+   ```
+   *Note: For accessibility from an Android emulator or mobile device, bind to `0.0.0.0:8000` (`DJANGO_RUNSERVER_ADDR=0.0.0.0:8000`) and add the machine's IP to `DJANGO_ALLOWED_HOSTS` in your configuration.*
 
-## Live Verification Completed
-The following checks passed on this machine:
-- Frontend reachable at `http://127.0.0.1:5173/` (HTTP 200)
-- Admin, faculty, and student login via JWT
-- Faculty bulk attendance marking endpoint
-- Student attendance listing endpoint
+   **Backend API URL:** `http://127.0.0.1:8000`
 
-## API Endpoints (MVP)
-### Auth
-- `POST /api/auth/login/`
-- `POST /api/auth/refresh/`
-- `GET /api/auth/me/`
-- `GET /api/auth/users/` (admin)
-- `POST /api/auth/register/` (admin)
+### Frontend Setup
+1. Open a new terminal window and navigate to the frontend directory:
+   ```bash
+   cd frontend
+   ```
+2. Install node dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the local frontend development server:
+   ```bash
+   npm run dev
+   ```
 
-### Academics
-- `GET/POST /api/academics/departments/` (admin)
-- `GET/POST /api/academics/semesters/` (admin)
-- `GET/POST /api/academics/courses/` (admin)
-- `GET/POST /api/academics/enrollments/` (admin/faculty scoped)
+   **Frontend Web Application URL:** `http://127.0.0.1:5173`
 
-### Attendance
-- `GET/POST /api/attendance/records/`
-- `POST /api/attendance/records/mark-bulk/`
+### Android Mobile Setup
+1. Open the `android/` directory using Android Studio.
+2. Allow Gradle to synchronize and download necessary dependencies.
+3. Configure the backend API base URL in your Android app configuration to direct to your local machine's IP address (not `localhost` nor `127.0.0.1`).
+4. Build and run the application on an emulator or physical device.
 
-## What to Build Next
-1. Admin UI for managing departments, semesters, courses, and enrollments
-2. Faculty timetable and course filters
-3. Student profile and academic detail pages
-4. Better attendance reports by subject
+## Seeded Demo Data (If configured locally)
+- Administrator: `admin@ums.local` (Password: `Admin@12345`)
+- Faculty: `faculty@ums.local` (Password: `Faculty@12345`)
+- Student: `student@ums.local` (Password: `Student@12345`)
