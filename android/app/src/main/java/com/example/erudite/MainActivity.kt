@@ -40,6 +40,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -50,19 +51,26 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.logging.HttpLoggingInterceptor
+import java.util.concurrent.TimeUnit
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.Multipart
 import retrofit2.http.POST
+import retrofit2.http.Part
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
+import retrofit2.Response
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -132,14 +140,138 @@ private fun StudentAttendanceApp(repo: StudentAttendanceRepository) {
             },
         )
     } else {
-        ScannerScreen(
-            user = user!!,
-            repo = repo,
-            onLogout = {
-                repo.logout()
-                user = null
-            },
+        if (user!!.benchmark_selfie == null) {
+            BenchmarkUploadScreen(
+                user = user!!,
+                repo = repo,
+                onUploaded = {
+                    val refreshed = repo.fetchMe()
+                    if (refreshed != null) user = refreshed
+                },
+                onLogout = {
+                    repo.logout()
+                    user = null
+                }
+            )
+        } else {
+            ScannerScreen(
+                user = user!!,
+                repo = repo,
+                onLogout = {
+                    repo.logout()
+                    user = null
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun BenchmarkUploadScreen(
+    user: UserResponse,
+    repo: StudentAttendanceRepository,
+    onUploaded: suspend () -> Unit,
+    onLogout: () -> Unit,
+) {
+    val context = LocalContext.current
+    var cameraPermissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED,
         )
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        cameraPermissionGranted = granted
+    }
+
+    var statusText by remember { mutableStateOf("Please capture a clear selfie for face verification.") }
+    var busy by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var cameraController by remember { mutableStateOf<CameraController?>(null) }
+
+    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("Hi, ${user.full_name}")
+                    Text("Upload benchmark selfie", style = MaterialTheme.typography.titleMedium)
+                }
+                TextButton(onClick = onLogout) { Text("Logout") }
+            }
+
+            if (!cameraPermissionGranted) {
+                Text(
+                    "Camera permission is required to take your benchmark selfie.",
+                    modifier = Modifier.padding(top = 16.dp),
+                )
+                Button(
+                    onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
+                    modifier = Modifier.padding(top = 8.dp),
+                ) {
+                    Text("Grant Camera Permission")
+                }
+            } else {
+                FrontCameraPreview(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(380.dp)
+                        .padding(top = 16.dp),
+                    lifecycleOwner = LocalLifecycleOwner.current,
+                    onControllerReady = { cameraController = it },
+                )
+
+                Button(
+                    onClick = {
+                        if (busy) return@Button
+                        busy = true
+                        statusText = "Capturing and uploading..."
+                        scope.launch {
+                            try {
+                                val selfie = cameraController?.captureSelfie()
+                                if (selfie == null) {
+                                    statusText = "Capture failed. Try again in good lighting."
+                                } else {
+                                    val res = repo.uploadBenchmarkSelfie(selfie)
+                                    if (res.isSuccess) {
+                                        statusText = "Benchmark uploaded successfully."
+                                        onUploaded()
+                                    } else {
+                                        statusText = res.exceptionOrNull()?.message ?: "Upload failed"
+                                    }
+                                }
+                            } catch (ex: Exception) {
+                                statusText = ex.message ?: "Error during upload"
+                            }
+                            busy = false
+                        }
+                    },
+                    modifier = Modifier.padding(top = 12.dp),
+                ) {
+                    if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Capture & Upload")
+                }
+            }
+
+            Text(
+                text = statusText,
+                modifier = Modifier.padding(top = 14.dp),
+                color = if (statusText.contains("failed", ignoreCase = true) || statusText.contains("error", ignoreCase = true)) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+        }
     }
 }
 
@@ -257,71 +389,40 @@ private fun ScannerScreen(
     var busy by remember { mutableStateOf(false) }
     var lastScanned by remember { mutableStateOf("") }
     var lastScanTs by remember { mutableLongStateOf(0L) }
+    
+    // New state for selfie capture workflow
+    var scannedToken by remember { mutableStateOf<String?>(null) }
+    var captureSelfieFrontCamera by remember { mutableStateOf(false) }
+    var frontCameraController by remember { mutableStateOf<CameraController?>(null) }
+    
     val scope = rememberCoroutineScope()
 
     val onDetected: (String) -> Unit = onDetected@{ rawValue ->
         val now = System.currentTimeMillis()
-        if (busy) return@onDetected
+        if (busy || captureSelfieFrontCamera) return@onDetected
         if (rawValue == lastScanned && now - lastScanTs < 2500) return@onDetected
 
         lastScanned = rawValue
         lastScanTs = now
-        busy = true
-        statusText = "Submitting attendance..."
-
-        scope.launch {
-            val token = extractToken(rawValue)
-            if (token.isBlank()) {
-                statusText = "Invalid QR payload."
-                busy = false
-                return@launch
-            }
-
-            // Attempt to get last known location (best-effort). Requires location permission.
-            var lat: Double? = null
-            var lon: Double? = null
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-            ) {
-                try {
-                    val lm = context.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
-                    val l = lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
-                        ?: lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
-                    if (l != null) {
-                        lat = l.latitude
-                        lon = l.longitude
-                    }
-                } catch (ex: Exception) {
-                    Log.w("EruditeScanner", "Could not fetch last known location", ex)
-                }
-            } else {
-                statusText = "Location permission not granted; tap to allow."
-                busy = false
-                return@launch
-            }
-
-            // Capture selfie (front camera) if controller available; this will briefly switch cameras.
-            var selfieBytes: ByteArray? = null
-            try {
-                selfieBytes = cameraController?.captureSelfie()
-            } catch (ex: Exception) {
-                Log.w("EruditeScanner", "Selfie capture failed", ex)
-            }
-
-            if (selfieBytes == null) {
-                statusText = "Selfie capture failed. Please scan again in good lighting."
-                busy = false
-                return@launch
-            }
-
-            val result = repo.scanAttendance(token, lat, lon, selfieBytes)
-            statusText = if (result.isSuccess) {
-                result.getOrNull()?.detail ?: "Attendance marked."
-            } else {
-                result.exceptionOrNull()?.message ?: "Scan failed"
-            }
-            busy = false
+        
+        val token = extractToken(rawValue)
+        if (token.isBlank()) {
+            statusText = "Invalid QR payload."
+            return@onDetected
         }
+
+        // Check location permission
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            statusText = "Location permission not granted; tap to allow."
+            return@onDetected
+        }
+
+        // QR scanned successfully; now show selfie camera
+        statusText = "QR scanned! Take selfie to mark attendance."
+        scannedToken = token
+        captureSelfieFrontCamera = true
     }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -367,15 +468,111 @@ private fun ScannerScreen(
                         Text("Grant Location Permission")
                     }
                 }
-                CameraQrScanner(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(380.dp)
-                        .padding(top = 16.dp),
-                    lifecycleOwner = lifecycleOwner,
-                    onDetected = onDetected,
-                    onControllerReady = { cameraController = it },
-                )
+                
+                if (captureSelfieFrontCamera && scannedToken != null) {
+                    // Selfie capture workflow
+                    FrontCameraPreview(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(380.dp)
+                            .padding(top = 16.dp),
+                        lifecycleOwner = lifecycleOwner,
+                        onControllerReady = { frontCameraController = it },
+                    )
+                    
+                    Button(
+                        onClick = captureAndSubmit@{
+                            if (frontCameraController == null) {
+                                statusText = "Camera not ready. Please wait..."
+                                return@captureAndSubmit
+                            }
+                            busy = true
+                            scope.launch {
+                                statusText = "Capturing selfie..."
+                                var selfieBytes: ByteArray? = null
+                                
+                                try {
+                                    selfieBytes = frontCameraController?.captureSelfie()
+                                } catch (ex: Exception) {
+                                    Log.e("EruditeScanner", "Selfie capture failed", ex)
+                                    statusText = "Selfie capture failed: ${ex.message}"
+                                    busy = false
+                                    captureSelfieFrontCamera = false
+                                    scannedToken = null
+                                    return@launch
+                                }
+
+                                if (selfieBytes == null) {
+                                    statusText = "Selfie capture failed. Please try again in good lighting."
+                                    busy = false
+                                    captureSelfieFrontCamera = false
+                                    scannedToken = null
+                                    return@launch
+                                }
+
+                                statusText = "Submitting attendance..."
+                                
+                                // Get location
+                                var lat: Double? = null
+                                var lon: Double? = null
+                                try {
+                                    val lm = context.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+                                    val l = lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
+                                        ?: lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
+                                    if (l != null) {
+                                        lat = l.latitude
+                                        lon = l.longitude
+                                    }
+                                } catch (ex: Exception) {
+                                    Log.w("EruditeScanner", "Could not fetch location", ex)
+                                }
+
+                                val result = repo.scanAttendance(scannedToken!!, lat, lon, selfieBytes)
+                                statusText = if (result.isSuccess) {
+                                    result.getOrNull()?.detail ?: "Attendance marked successfully."
+                                } else {
+                                    result.exceptionOrNull()?.message ?: "Attendance marking failed."
+                                }
+                                
+                                captureSelfieFrontCamera = false
+                                scannedToken = null
+                                busy = false
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 16.dp),
+                        enabled = !busy && frontCameraController != null
+                    ) {
+                        Text(if (busy) "Processing..." else "Capture & Submit")
+                    }
+                    
+                    Button(
+                        onClick = {
+                            captureSelfieFrontCamera = false
+                            scannedToken = null
+                            statusText = "Point camera at class QR code"
+                            busy = false
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        enabled = !busy
+                    ) {
+                        Text("Cancel")
+                    }
+                } else {
+                    // QR scanner
+                    CameraQrScanner(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(380.dp)
+                            .padding(top = 16.dp),
+                        lifecycleOwner = lifecycleOwner,
+                        onDetected = onDetected,
+                        onControllerReady = { cameraController = it },
+                    )
+                }
             }
 
             Text(
@@ -383,6 +580,8 @@ private fun ScannerScreen(
                 modifier = Modifier.padding(top = 14.dp),
                 color = if (statusText.contains("failed", ignoreCase = true) || statusText.contains("invalid", ignoreCase = true)) {
                     MaterialTheme.colorScheme.error
+                } else if (statusText.contains("marked", ignoreCase = true) || statusText.contains("successfully", ignoreCase = true)) {
+                    Color.Green
                 } else {
                     MaterialTheme.colorScheme.onSurface
                 },
@@ -525,6 +724,108 @@ private fun CameraQrScanner(
     )
 }
 
+@Composable
+private fun FrontCameraPreview(
+    modifier: Modifier,
+    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    onControllerReady: (CameraController) -> Unit = {},
+) {
+    val context = LocalContext.current
+
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            val previewView = PreviewView(ctx)
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = androidx.camera.core.Preview.Builder().build().also {
+                    it.surfaceProvider = previewView.surfaceProvider
+                }
+
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_FRONT_CAMERA,
+                        preview,
+                    )
+                } catch (ex: Exception) {
+                    Log.e("EruditeScanner", "Front camera bind failed", ex)
+                }
+
+                // Controller: capture selfie from front camera
+                val controller = CameraController(captureSelfie = {
+                    suspendCoroutine { cont ->
+                        val mainExec = ContextCompat.getMainExecutor(ctx)
+                        try {
+                            val imageCapture = androidx.camera.core.ImageCapture.Builder().build()
+                            try {
+                                cameraProvider.unbindAll()
+                                cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, imageCapture)
+                            } catch (bindEx: Exception) {
+                                cont.resumeWithException(bindEx)
+                                return@suspendCoroutine
+                            }
+
+                            val tmpFile = java.io.File(ctx.cacheDir, "benchmark_${System.currentTimeMillis()}.jpg")
+                            val outputOptions = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(tmpFile).build()
+                            imageCapture.takePicture(outputOptions, mainExec, object : androidx.camera.core.ImageCapture.OnImageSavedCallback {
+                                override fun onImageSaved(outputFileResults: androidx.camera.core.ImageCapture.OutputFileResults) {
+                                    try {
+                                        val bytes = tmpFile.readBytes()
+                                        // Rebind front camera preview
+                                        try {
+                                            val newPreview = androidx.camera.core.Preview.Builder().build().also {
+                                                it.surfaceProvider = previewView.surfaceProvider
+                                            }
+                                            cameraProvider.unbindAll()
+                                            cameraProvider.bindToLifecycle(
+                                                lifecycleOwner,
+                                                CameraSelector.DEFAULT_FRONT_CAMERA,
+                                                newPreview,
+                                            )
+                                        } catch (rebindEx: Exception) {
+                                            Log.e("EruditeScanner", "Failed to rebind front camera", rebindEx)
+                                        }
+                                        cont.resume(bytes)
+                                    } catch (e: Exception) {
+                                        cont.resumeWithException(e)
+                                    }
+                                }
+
+                                override fun onError(exception: androidx.camera.core.ImageCaptureException) {
+                                    try {
+                                        val newPreview = androidx.camera.core.Preview.Builder().build().also {
+                                            it.surfaceProvider = previewView.surfaceProvider
+                                        }
+                                        cameraProvider.unbindAll()
+                                        cameraProvider.bindToLifecycle(
+                                            lifecycleOwner,
+                                            CameraSelector.DEFAULT_FRONT_CAMERA,
+                                            newPreview,
+                                        )
+                                    } catch (rebindEx: Exception) {
+                                        Log.e("EruditeScanner", "Failed to rebind after capture error", rebindEx)
+                                    }
+                                    cont.resumeWithException(exception)
+                                }
+                            })
+                        } catch (e: Exception) {
+                            cont.resumeWithException(e)
+                        }
+                    }
+                })
+
+                onControllerReady(controller)
+            }, ContextCompat.getMainExecutor(ctx))
+
+            previewView
+        },
+    )
+}
+
 private fun processImageProxy(
     scanner: com.google.mlkit.vision.barcode.BarcodeScanner,
     imageProxy: ImageProxy,
@@ -566,6 +867,7 @@ private data class UserResponse(
     val email: String,
     val full_name: String,
     val role: String,
+    val benchmark_selfie: String?,
 )
 
 private interface EruditeApi {
@@ -580,6 +882,10 @@ private interface EruditeApi {
 
     @POST("attendance/qr-sessions/scan/")
     suspend fun scan(@Body body: ScanRequest): ScanResponse
+
+    @Multipart
+    @POST("auth/me/benchmark-selfie/")
+    suspend fun uploadBenchmarkSelfie(@Part selfie: MultipartBody.Part): Response<Unit>
 }
 
 private class StudentAttendanceRepository(private val appContext: Context) {
@@ -610,6 +916,9 @@ private class StudentAttendanceRepository(private val appContext: Context) {
         rawClient = OkHttpClient.Builder()
             .addInterceptor(authInterceptor)
             .addInterceptor(logging)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
             .build()
 
         val retrofit = Retrofit.Builder()
@@ -644,37 +953,86 @@ private class StudentAttendanceRepository(private val appContext: Context) {
 
     suspend fun scanAttendance(token: String, latitude: Double? = null, longitude: Double? = null, selfie: ByteArray? = null): Result<ScanResponse> {
         return runCatching {
-            val url = BASE_URL + "attendance/qr-sessions/scan/"
-            val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
-            builder.addFormDataPart("token", token)
-            if (latitude != null) builder.addFormDataPart("latitude", latitude.toString())
-            if (longitude != null) builder.addFormDataPart("longitude", longitude.toString())
-            var tmpFile: java.io.File? = null
-            if (selfie != null) {
-                tmpFile = java.io.File.createTempFile("selfie", ".jpg", appContext.cacheDir)
-                tmpFile.outputStream().use { it.write(selfie) }
-                val mediaType = "image/jpeg".toMediaTypeOrNull()
-                builder.addFormDataPart("selfie", "selfie.jpg", tmpFile.asRequestBody(mediaType))
-            }
+            withContext(Dispatchers.IO) {
+                val url = BASE_URL + "attendance/qr-sessions/scan/"
+                Log.d(
+                    "EruditeScanner",
+                    "scanAttendance: preparing request url=$url qrTokenPrefix=${token.take(8)} accessTokenPresent=${!accessToken.isNullOrBlank()} refreshTokenPresent=${!refreshToken.isNullOrBlank()} latitude=$latitude longitude=$longitude selfieBytes=${selfie?.size ?: 0}",
+                )
 
-            val requestBody = builder.build()
-            val requestBuilder = Request.Builder().url(url).post(requestBody)
-            val tokenHeader = accessToken
-            if (!tokenHeader.isNullOrBlank()) {
-                requestBuilder.addHeader("Authorization", "Bearer $tokenHeader")
-            }
+                Log.d("EruditeScanner", "scanAttendance: refreshing access token before request")
+                if (!refreshAccessToken()) {
+                    if (accessToken.isNullOrBlank()) {
+                        throw Exception("Not authenticated. Please log in again.")
+                    }
+                    Log.w("EruditeScanner", "scanAttendance: preflight refresh failed, continuing with existing access token")
+                }
 
-            val req = requestBuilder.build()
-            val resp = rawClient.newCall(req).execute()
-            val body = resp.body?.string() ?: throw Exception("Empty response")
-            if (!resp.isSuccessful) throw Exception("Scan failed: $body")
-            val gson = com.google.gson.Gson()
-            gson.fromJson(body, ScanResponse::class.java)
+                val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
+                builder.addFormDataPart("token", token)
+                if (latitude != null) builder.addFormDataPart("latitude", latitude.toString())
+                if (longitude != null) builder.addFormDataPart("longitude", longitude.toString())
+                var tmpFile: java.io.File? = null
+                if (selfie != null) {
+                    tmpFile = java.io.File.createTempFile("selfie", ".jpg", appContext.cacheDir)
+                    tmpFile.outputStream().use { it.write(selfie) }
+                    val mediaType = "image/jpeg".toMediaTypeOrNull()
+                    builder.addFormDataPart("selfie", "selfie.jpg", tmpFile.asRequestBody(mediaType))
+                    Log.d("EruditeScanner", "scanAttendance: wrote selfie temp file=${tmpFile.absolutePath} size=${tmpFile.length()}")
+                }
+
+                val requestBody = builder.build()
+                val requestBuilder = Request.Builder().url(url).post(requestBody)
+
+                val req = requestBuilder.build()
+                Log.d("EruditeScanner", "scanAttendance: executing request headers=${req.headers}")
+                val resp = rawClient.newCall(req).execute()
+                val body = resp.body?.string() ?: throw Exception("Empty response")
+                Log.d("EruditeScanner", "scanAttendance: response code=${resp.code} body=$body")
+
+                if (resp.code == 401) {
+                    Log.w("EruditeScanner", "scanAttendance: unauthorized response even after preflight refresh")
+                    throw Exception("Unauthorized: access token rejected by backend")
+                }
+
+                if (!resp.isSuccessful) throw Exception("Scan failed: $body")
+                val gson = com.google.gson.Gson()
+                gson.fromJson(body, ScanResponse::class.java)
+            }
         }.recoverCatching {
+            Log.e("EruditeScanner", "scanAttendance failed: ${it.message}", it)
+            throw it
+        }
+    }
+
+    suspend fun uploadBenchmarkSelfie(selfie: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val url = BASE_URL + "auth/me/benchmark-selfie/"
+            Log.d("EruditeScanner", "Uploading benchmark selfie to: $url")
+
+            val requestBody = selfie.toRequestBody("image/jpeg".toMediaTypeOrNull())
+            val part = MultipartBody.Part.createFormData("selfie", "benchmark.jpg", requestBody)
+
+            val response = api.uploadBenchmarkSelfie(part)
+            if (!response.isSuccessful) {
+                throw Exception("Upload failed: ${response.code()} - ${response.errorBody()?.string().orEmpty()}")
+            }
+
+            Log.d("EruditeScanner", "Benchmark selfie uploaded successfully")
+            Unit
+        }.recoverCatching { ex ->
+            Log.e("EruditeScanner", "uploadBenchmarkSelfie failed with: ${ex.message}", ex)
             if (refreshAccessToken()) {
-                scanAttendance(token, latitude, longitude, selfie).getOrThrow()
+                Log.d("EruditeScanner", "Retrying uploadBenchmarkSelfie after refresh")
+                val requestBody = selfie.toRequestBody("image/jpeg".toMediaTypeOrNull())
+                val part = MultipartBody.Part.createFormData("selfie", "benchmark.jpg", requestBody)
+                val response = api.uploadBenchmarkSelfie(part)
+                if (!response.isSuccessful) {
+                    throw Exception("Upload failed: ${response.code()} - ${response.errorBody()?.string().orEmpty()}")
+                }
+                Unit
             } else {
-                throw it
+                throw ex
             }
         }
     }

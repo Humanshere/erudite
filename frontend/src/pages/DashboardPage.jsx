@@ -589,22 +589,10 @@ function FacultyPanel({ initialSelection, onSelectionConsumed, onBackToTimetable
   const [nowMs, setNowMs] = useState(Date.now());
   const [message, setMessage] = useState({ text: "", type: "info" });
 
-  const getFacultyLocation = () => new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
-      reject(new Error("Geolocation is not supported in this browser."));
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      (position) => resolve({
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-        accuracy: position.coords.accuracy,
-      }),
-      (error) => reject(error),
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
-    );
-  });
+  // Fixed location: 100 meter radius around 25.427708664097267, 81.77178170843034
+  const FIXED_FACULTY_LATITUDE = 25.427708664097267;
+  const FIXED_FACULTY_LONGITUDE = 81.77178170843034;
+  const FIXED_FACULTY_ACCURACY = 100; // 100 meter radius
 
   const refreshSessionRoster = async (sessionInfo, qrSessionInfo = activeQrSession) => {
     if (!sessionInfo?.id) return;
@@ -706,14 +694,13 @@ function FacultyPanel({ initialSelection, onSelectionConsumed, onBackToTimetable
 
     try {
       setQrBusy(true);
-      setMessage({ text: "Requesting faculty location...", type: "info" });
-      const facultyLocation = await getFacultyLocation();
+      setMessage({ text: "Generating QR session...", type: "info" });
       const res = await client.post("/attendance/qr-sessions/", {
         class_session_id: Number(selectedSession.id),
         duration_minutes: Number(qrDurationMinutes),
-        faculty_latitude: facultyLocation.latitude,
-        faculty_longitude: facultyLocation.longitude,
-        faculty_location_accuracy: facultyLocation.accuracy,
+        faculty_latitude: FIXED_FACULTY_LATITUDE,
+        faculty_longitude: FIXED_FACULTY_LONGITUDE,
+        faculty_location_accuracy: FIXED_FACULTY_ACCURACY,
       });
       setActiveQrSession(res.data);
       await refreshSessionRoster(selectedSession, res.data);

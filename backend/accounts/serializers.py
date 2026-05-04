@@ -6,7 +6,11 @@ from .models import User
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("id", "email", "full_name", "role", "is_active")
+        fields = ("id", "email", "full_name", "role", "is_active", "benchmark_selfie")
+
+
+class BenchmarkSelfieSerializer(serializers.Serializer):
+    selfie = serializers.ImageField()
 
 
 class RegisterSerializer(serializers.ModelSerializer):

@@ -284,51 +284,166 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="scan")
     def scan(self, request):
+        def scan_log(message):
+            print(f"[QR Scan] {message}")
+
+        scan_log(f"Request received from user={request.user.id} role={getattr(request.user, 'role', None)}")
+        scan_log(f"Incoming keys={sorted(list(request.data.keys()))}")
         self._finalize_expired_sessions()
+        scan_log("Expired sessions checked")
+
         serializer = AttendanceQrScanSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         token = serializer.validated_data["token"]
+        scan_log(f"Payload validated token={str(token)[:8]}...")
 
         # Enforce mandatory anti-proxy fields
         if "latitude" not in serializer.validated_data or "longitude" not in serializer.validated_data:
+            scan_log("Rejected: latitude/longitude missing")
             return Response({"detail": "Location (latitude and longitude) is required."}, status=status.HTTP_400_BAD_REQUEST)
         has_selfie = "selfie" in serializer.validated_data or request.FILES.get("selfie")
         if not has_selfie:
+            scan_log("Rejected: selfie missing")
             return Response({"detail": "Selfie image is required."}, status=status.HTTP_400_BAD_REQUEST)
 
+        scan_log("Looking up QR session by token")
         session = (
             AttendanceQrSession.objects.select_related("course", "class_session", "created_by")
             .filter(token=token)
             .first()
         )
         if not session:
+            scan_log("Rejected: invalid QR token")
             return Response({"detail": "Invalid QR token."}, status=status.HTTP_404_NOT_FOUND)
 
         now = timezone.now()
+        scan_log(
+            f"Session found id={session.id} course={session.course_id} class_session={session.class_session_id} active={session.is_active} now={now.isoformat()} ends_at={session.ends_at.isoformat()}"
+        )
         if now > session.ends_at and not session.finalized_at:
+            scan_log("Session expired, finalizing before proceeding")
             self._finalize_session(session)
 
         if not session.is_active:
+            scan_log("Rejected: session inactive")
             return Response({"detail": "This QR session is inactive."}, status=status.HTTP_400_BAD_REQUEST)
         if now < session.starts_at:
+            scan_log("Rejected: session not active yet")
             return Response({"detail": "This QR session is not active yet."}, status=status.HTTP_400_BAD_REQUEST)
         if now > session.ends_at:
+            scan_log("Rejected: session expired")
             return Response({"detail": "This QR session has expired."}, status=status.HTTP_400_BAD_REQUEST)
 
         student = request.user
         latitude = serializer.validated_data.get("latitude")
         longitude = serializer.validated_data.get("longitude")
         distance = _distance_meters(session.faculty_latitude, session.faculty_longitude, latitude, longitude)
-        if distance > 40:
+        scan_log(
+            f"Location received latitude={latitude} longitude={longitude} session_center=({session.faculty_latitude}, {session.faculty_longitude}) distance={distance:.2f}m"
+        )
+        
+        # Use session's faculty_location_accuracy as the allowed radius (default to 40m if not set)
+        allowed_radius = session.faculty_location_accuracy or 40
+        scan_log(f"Allowed radius={allowed_radius}m")
+        if distance > allowed_radius:
+            scan_log("Rejected: outside allowed radius")
             return Response(
-                {"detail": "You are outside the allowed 40m radius for this QR session."},
+                {"detail": f"You are outside the allowed {allowed_radius}m radius for this QR session."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # Face verification: ensure student has a benchmark and the selfie matches
+        # Get student's benchmark encoding
+        student_benchmark = getattr(student, "benchmark_face_encoding", None)
+        if not student_benchmark:
+            scan_log("Rejected: no benchmark face encoding found for student")
+            return Response({"detail": "No benchmark selfie found. Upload benchmark selfie before scanning."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # load selfie from request.FILES or validated_data
+        selfie_file = serializer.validated_data.get("selfie") if "selfie" in serializer.validated_data else None
+        if not selfie_file and request.FILES.get("selfie"):
+            selfie_file = request.FILES.get("selfie")
+
+        if not selfie_file:
+            scan_log("Rejected: selfie file missing after validation")
+            return Response({"detail": "Selfie is required for face verification."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # compress and compute encoding for uploaded selfie
+        try:
+            from PIL import Image
+            import io
+            import face_recognition
+
+            scan_log(f"Starting face verification for user={student.id}")
+            
+            img = Image.open(selfie_file)
+            # respect EXIF orientation
+            from PIL import ImageOps
+            img = ImageOps.exif_transpose(img)
+            img = img.convert("RGB")
+            max_dim = 800
+            if max(img.size) > max_dim:
+                ratio = max_dim / max(img.size)
+                img = img.resize((int(img.size[0] * ratio), int(img.size[1] * ratio)), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
+            buf.seek(0)
+            
+            scan_log(f"Loading selfie image size={img.size}")
+            uploaded_np = face_recognition.load_image_file(buf)
+            scan_log(f"Selfie image loaded shape={uploaded_np.shape}")
+            
+            # try hog then cnn fallback for robustness
+            scan_log("Detecting face encodings")
+            uploaded_encs = face_recognition.face_encodings(uploaded_np)
+            
+            if not uploaded_encs:
+                scan_log("No encodings found initially, trying HOG face detection")
+                locs_hog = face_recognition.face_locations(uploaded_np, model="hog")
+                scan_log(f"HOG detected {len(locs_hog)} faces")
+                
+                if not locs_hog:
+                    try:
+                        scan_log("No HOG faces, trying CNN detection")
+                        locs_cnn = face_recognition.face_locations(uploaded_np, model="cnn")
+                        scan_log(f"CNN detected {len(locs_cnn)} faces")
+                        if locs_cnn:
+                            uploaded_encs = face_recognition.face_encodings(uploaded_np, known_face_locations=locs_cnn)
+                    except Exception as ex:
+                        scan_log(f"CNN failed: {str(ex)}")
+            
+            if not uploaded_encs:
+                scan_log("Rejected: no face detected in selfie")
+                return Response({"detail": "No face detected in the selfie."}, status=status.HTTP_400_BAD_REQUEST)
+            
+            uploaded_enc = uploaded_encs[0]
+            scan_log("Face encoded successfully")
+
+            # compare with stored benchmark
+            import numpy as _np
+            benchmark_enc = _np.array(student_benchmark)
+            dist = float(_np.linalg.norm(benchmark_enc - uploaded_enc))
+            scan_log(f"Face distance={dist:.4f}")
+            
+            # threshold: 0.6 is common; use 0.5 for stricter matching
+            if dist > 0.5:
+                scan_log(f"Rejected: face mismatch distance={dist:.4f} threshold=0.5")
+                return Response({"detail": "Face did not match benchmark."}, status=status.HTTP_403_FORBIDDEN)
+            
+            scan_log("Face matched successfully")
+        except Exception as ex:
+            scan_log(f"Exception during face verification: {str(ex)}")
+            import traceback
+            traceback.print_exc()
+            return Response({"detail": f"Face verification failed: {str(ex)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        scan_log("Checking enrollment")
         is_enrolled = Enrollment.objects.filter(course=session.course, student=student).exists()
         if not is_enrolled:
+            scan_log("Rejected: student not enrolled in course")
             return Response({"detail": "You are not enrolled in this course."}, status=status.HTTP_403_FORBIDDEN)
 
+        scan_log("Creating or updating attendance record")
         lookup = {"student": student}
         if session.class_session:
             lookup["class_session"] = session.class_session
@@ -348,6 +463,7 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
                 "marked_by": session.created_by,
             },
         )
+        scan_log(f"Attendance record saved id={record.id} status={record.status}")
 
         # Save optional location/selfie metadata if provided
         latitude = serializer.validated_data.get("latitude")
@@ -372,7 +488,10 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
             record.selfie = selfie
             dirty = True
         if dirty:
+            scan_log("Saving optional metadata on attendance record")
             record.save()
+
+        scan_log("QR scan processing completed successfully")
 
         return Response(
             {

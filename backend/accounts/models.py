@@ -42,6 +42,8 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     full_name = models.CharField(max_length=255)
     role = models.CharField(max_length=20, choices=Role.choices)
+    benchmark_selfie = models.ImageField(upload_to="benchmark_selfies/", null=True, blank=True)
+    benchmark_face_encoding = models.JSONField(null=True, blank=True)
 
     objects = UserManager()
 
