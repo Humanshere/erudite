@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { GraduationCap, User, Clipboard, BarChart2 } from "lucide-react";
 import { Navigate, useLocation } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
@@ -34,7 +35,7 @@ export default function LoginPage() {
       <div className="login-left">
         <div className="login-brand">
           <div className="login-logo">
-            <div className="login-logo-icon">🎓</div>
+            <div className="login-logo-icon"><GraduationCap size={20} color="white" /></div>
             <h2>Erudite<br /></h2>
           </div>
           <h1 className="login-headline">
@@ -49,15 +50,15 @@ export default function LoginPage() {
 
         <div className="login-features">
           <div className="login-feature">
-            <div className="login-feature-icon">👤</div>
+            <div className="login-feature-icon"><User size={16} color="white" /></div>
             <span>Role-based access for Admin, Faculty &amp; Student</span>
           </div>
           <div className="login-feature">
-            <div className="login-feature-icon">📋</div>
+            <div className="login-feature-icon"><Clipboard size={16} color="white" /></div>
             <span>Mark and track attendance by course and date</span>
           </div>
           <div className="login-feature">
-            <div className="login-feature-icon">📊</div>
+            <div className="login-feature-icon"><BarChart2 size={16} color="white" /></div>
             <span>Course-wise insights and enrollment overview</span>
           </div>
         </div>

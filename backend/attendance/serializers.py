@@ -48,6 +48,9 @@ class BulkAttendanceMarkSerializer(serializers.Serializer):
 class AttendanceQrSessionCreateSerializer(serializers.Serializer):
     course_id = serializers.IntegerField(required=False)
     class_session_id = serializers.IntegerField(required=False)
+    faculty_latitude = serializers.FloatField()
+    faculty_longitude = serializers.FloatField()
+    faculty_location_accuracy = serializers.FloatField(required=False, allow_null=True)
     date = serializers.DateField(required=False)
     duration_minutes = serializers.IntegerField(min_value=1, max_value=240, default=10)
 
@@ -80,6 +83,9 @@ class AttendanceQrSessionSerializer(serializers.ModelSerializer):
             "class_session_end_time",
             "created_by",
             "token",
+            "faculty_latitude",
+            "faculty_longitude",
+            "faculty_location_accuracy",
             "date",
             "starts_at",
             "ends_at",

@@ -1,5 +1,6 @@
 import base64
 import io
+import math
 from datetime import timedelta
 
 import qrcode
@@ -20,6 +21,17 @@ from .serializers import (
     AttendanceRecordSerializer,
     BulkAttendanceMarkSerializer,
 )
+
+
+def _distance_meters(lat1, lon1, lat2, lon2):
+    radius_m = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    return 2 * radius_m * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 class AttendanceRecordViewSet(viewsets.ModelViewSet):
@@ -232,6 +244,9 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
             course=course,
             class_session=class_session,
             created_by=user,
+            faculty_latitude=data["faculty_latitude"],
+            faculty_longitude=data["faculty_longitude"],
+            faculty_location_accuracy=data.get("faculty_location_accuracy"),
             date=session_date,
             starts_at=starts_at,
             ends_at=ends_at,
@@ -301,6 +316,15 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
             return Response({"detail": "This QR session has expired."}, status=status.HTTP_400_BAD_REQUEST)
 
         student = request.user
+        latitude = serializer.validated_data.get("latitude")
+        longitude = serializer.validated_data.get("longitude")
+        distance = _distance_meters(session.faculty_latitude, session.faculty_longitude, latitude, longitude)
+        if distance > 40:
+            return Response(
+                {"detail": "You are outside the allowed 40m radius for this QR session."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         is_enrolled = Enrollment.objects.filter(course=session.course, student=student).exists()
         if not is_enrolled:
             return Response({"detail": "You are not enrolled in this course."}, status=status.HTTP_403_FORBIDDEN)
@@ -320,7 +344,7 @@ class AttendanceQrSessionViewSet(viewsets.ModelViewSet):
                 "class_session": session.class_session,
                 "date": session.date,
                 "status": AttendanceRecord.Status.PRESENT,
-                "remark": "Marked via QR scan",
+                "remark": f"Marked via QR scan ({distance:.1f}m from QR center)",
                 "marked_by": session.created_by,
             },
         )

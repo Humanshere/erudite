@@ -63,8 +63,6 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -298,6 +296,8 @@ private fun ScannerScreen(
                 }
             } else {
                 statusText = "Location permission not granted; tap to allow."
+                busy = false
+                return@launch
             }
 
             // Capture selfie (front camera) if controller available; this will briefly switch cameras.
@@ -306,6 +306,12 @@ private fun ScannerScreen(
                 selfieBytes = cameraController?.captureSelfie()
             } catch (ex: Exception) {
                 Log.w("EruditeScanner", "Selfie capture failed", ex)
+            }
+
+            if (selfieBytes == null) {
+                statusText = "Selfie capture failed. Please scan again in good lighting."
+                busy = false
+                return@launch
             }
 
             val result = repo.scanAttendance(token, lat, lon, selfieBytes)
@@ -437,7 +443,8 @@ private fun CameraQrScanner(
                 }
 
                 // Controller: capture selfie by briefly switching to front camera and using ImageCapture
-                val controller = CameraController(captureSelfie = suspendCoroutine { cont ->
+                val controller = CameraController(captureSelfie = {
+                    suspendCoroutine { cont ->
                     val mainExec = ContextCompat.getMainExecutor(ctx)
                     try {
                         val imageCapture = androidx.camera.core.ImageCapture.Builder().build()
@@ -507,6 +514,7 @@ private fun CameraQrScanner(
                     } catch (e: Exception) {
                         cont.resumeWithException(e)
                     }
+                }
                 })
 
                 onControllerReady(controller)
@@ -574,8 +582,8 @@ private interface EruditeApi {
     suspend fun scan(@Body body: ScanRequest): ScanResponse
 }
 
-private class StudentAttendanceRepository(context: Context) {
-    private val prefs = context.getSharedPreferences("erudite_student_prefs", Context.MODE_PRIVATE)
+private class StudentAttendanceRepository(private val appContext: Context) {
+    private val prefs = appContext.getSharedPreferences("erudite_student_prefs", Context.MODE_PRIVATE)
     private val accessKey = "access_token"
     private val refreshKey = "refresh_token"
 
@@ -583,6 +591,7 @@ private class StudentAttendanceRepository(context: Context) {
     private var refreshToken: String? = prefs.getString(refreshKey, null)
 
     private val api: EruditeApi
+    private val rawClient: OkHttpClient
 
     init {
         val authInterceptor = Interceptor { chain ->
@@ -598,7 +607,7 @@ private class StudentAttendanceRepository(context: Context) {
             level = HttpLoggingInterceptor.Level.BODY
         }
 
-        val rawClient = OkHttpClient.Builder()
+        rawClient = OkHttpClient.Builder()
             .addInterceptor(authInterceptor)
             .addInterceptor(logging)
             .build()
@@ -633,18 +642,6 @@ private class StudentAttendanceRepository(context: Context) {
         return if (refreshed) fetchMe() else null
     }
 
-    suspend fun scanAttendance(token: String, latitude: Double? = null, longitude: Double? = null): Result<ScanResponse> {
-        return runCatching {
-            api.scan(ScanRequest(token = token, latitude = latitude, longitude = longitude))
-        }.recoverCatching {
-            if (refreshAccessToken()) {
-                api.scan(ScanRequest(token = token, latitude = latitude, longitude = longitude))
-            } else {
-                throw it
-            }
-        }
-    }
-
     suspend fun scanAttendance(token: String, latitude: Double? = null, longitude: Double? = null, selfie: ByteArray? = null): Result<ScanResponse> {
         return runCatching {
             val url = BASE_URL + "attendance/qr-sessions/scan/"
@@ -654,7 +651,7 @@ private class StudentAttendanceRepository(context: Context) {
             if (longitude != null) builder.addFormDataPart("longitude", longitude.toString())
             var tmpFile: java.io.File? = null
             if (selfie != null) {
-                tmpFile = java.io.File.createTempFile("selfie", ".jpg", context.cacheDir)
+                tmpFile = java.io.File.createTempFile("selfie", ".jpg", appContext.cacheDir)
                 tmpFile.outputStream().use { it.write(selfie) }
                 val mediaType = "image/jpeg".toMediaTypeOrNull()
                 builder.addFormDataPart("selfie", "selfie.jpg", tmpFile.asRequestBody(mediaType))
@@ -675,7 +672,7 @@ private class StudentAttendanceRepository(context: Context) {
             gson.fromJson(body, ScanResponse::class.java)
         }.recoverCatching {
             if (refreshAccessToken()) {
-                scanAttendance(token, latitude, longitude, selfie)
+                scanAttendance(token, latitude, longitude, selfie).getOrThrow()
             } else {
                 throw it
             }

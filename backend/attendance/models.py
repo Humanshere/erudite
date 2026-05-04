@@ -67,6 +67,9 @@ class AttendanceQrSession(models.Model):
         limit_choices_to={"role__in": ["admin", "faculty"]},
     )
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    faculty_latitude = models.FloatField(null=True, blank=True)
+    faculty_longitude = models.FloatField(null=True, blank=True)
+    faculty_location_accuracy = models.FloatField(null=True, blank=True)
     date = models.DateField()
     starts_at = models.DateTimeField(default=timezone.now)
     ends_at = models.DateTimeField()

@@ -1,4 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  GraduationCap,
+  User,
+  Users,
+  BookOpen,
+  Clipboard,
+  Calendar,
+  BarChart2,
+  Folder,
+  LogOut,
+  Search,
+  Plus,
+  CheckCircle,
+  Clock,
+  X,
+  Check,
+} from "lucide-react";
 
 import client from "../api/client";
 import { useAuth } from "../auth/AuthContext";
@@ -15,19 +32,19 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
   const navItems = useMemo(() => {
     if (user.role === "admin") {
       return [
-        { id: "users",       label: "Users",           icon: "👤" },
-        { id: "courses",     label: "Courses",         icon: "📚" },
-        { id: "enrollments", label: "Enrollments",     icon: "📋" },
+        { id: "users",       label: "Users",           Icon: User },
+        { id: "courses",     label: "Courses",         Icon: BookOpen },
+        { id: "enrollments", label: "Enrollments",     Icon: Clipboard },
       ];
     }
     if (user.role === "faculty") {
       return [
-        { id: "timetable",   label: "Timetable",       icon: "🗓️" },
+        { id: "timetable",   label: "Timetable",       Icon: Calendar },
       ];
     }
     return [
-      { id: "overview",    label: "Overview",          icon: "📊" },
-      { id: "history",     label: "Attendance Log",    icon: "🗂️" },
+      { id: "overview",    label: "Overview",          Icon: BarChart2 },
+      { id: "history",     label: "Attendance Log",    Icon: Folder },
     ];
   }, [user.role]);
 
@@ -67,7 +84,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
       <aside className="sidebar">
         <div className="sidebar-logo">
           <div className="sidebar-logo-mark">
-            <div className="logo-icon">🎓</div>
+            <div className="logo-icon"><GraduationCap size={18} color="white" /></div>
             <h2>Erudite</h2>
           </div>
           <p>Management System</p>
@@ -92,7 +109,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
               className={`sidebar-nav-item ${activeNav === item.id ? "active" : ""}`}
               onClick={() => setActiveNav(item.id)}
             >
-              <span className="nav-icon">{item.icon}</span>
+              <span className="nav-icon">{item.Icon ? <item.Icon size={16} /> : null}</span>
               {item.label}
             </button>
           ))}
@@ -100,7 +117,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
 
         <div className="sidebar-footer">
           <button type="button" onClick={logout}>
-            <span>⎋</span> Sign Out
+            <LogOut size={16} /> Sign Out
           </button>
         </div>
       </aside>
@@ -113,7 +130,7 @@ function AppShell({ children, user, logout, activeNav, setActiveNav }) {
             {panelSub && <p>{panelSub}</p>}
           </div>
           <div className="topbar-right">
-            <span className="date-chip">📅 {todayText}</span>
+            <span className="date-chip"><Calendar size={14} /> {todayText}</span>
           </div>
         </div>
 
@@ -279,22 +296,22 @@ function AdminPanel({ activeSection }) {
       {/* Stats */}
       <div className="stat-grid">
         <div className="stat-card blue">
-          <span className="stat-icon">👥</span>
+          <span className="stat-icon"><Users size={20} /></span>
           <span className="stat-label">Total Users</span>
           <strong className="stat-value">{allUsers.length}</strong>
         </div>
         <div className="stat-card teal">
-          <span className="stat-icon">📚</span>
+          <span className="stat-icon"><BookOpen size={20} /></span>
           <span className="stat-label">Courses</span>
           <strong className="stat-value">{courses.length}</strong>
         </div>
         <div className="stat-card green">
-          <span className="stat-icon">🧑‍🏫</span>
+          <span className="stat-icon"><User size={20} /></span>
           <span className="stat-label">Faculty</span>
           <strong className="stat-value">{facultyUsers.length}</strong>
         </div>
         <div className="stat-card amber">
-          <span className="stat-icon">📋</span>
+          <span className="stat-icon"><Clipboard size={20} /></span>
           <span className="stat-label">Enrollments</span>
           <strong className="stat-value">{enrollments.length}</strong>
         </div>
@@ -337,7 +354,7 @@ function AdminPanel({ activeSection }) {
               <div className="form-group" style={{ justifyContent: "flex-end" }}>
                 <label>&nbsp;</label>
                 <button type="button" className="btn-primary" onClick={createUser}>
-                  + Create User
+                  <Plus size={14} /> Create User
                 </button>
               </div>
             </div>
@@ -346,7 +363,7 @@ function AdminPanel({ activeSection }) {
           <div className="panel-header" style={{ borderTop: "1px solid var(--border)" }}>
             <h3>All Users</h3>
             <div className="search-bar" style={{ width: 260 }}>
-              <span className="search-icon">🔍</span>
+              <span className="search-icon"><Search size={14} /></span>
               <input type="text" placeholder="Search name, email, role…"
                 value={userQuery} onChange={(e) => setUserQuery(e.target.value)} />
             </div>
@@ -434,14 +451,14 @@ function AdminPanel({ activeSection }) {
               </div>
             </div>
             <div style={{ marginTop: 16 }}>
-              <button type="button" className="btn-primary" onClick={createCourse}>+ Create Course</button>
+              <button type="button" className="btn-primary" onClick={createCourse}><Plus size={14} /> Create Course</button>
             </div>
           </div>
 
           <div className="panel-header" style={{ borderTop: "1px solid var(--border)" }}>
             <h3>All Courses</h3>
             <div className="search-bar" style={{ width: 280 }}>
-              <span className="search-icon">🔍</span>
+              <span className="search-icon"><Search size={14} /></span>
               <input type="text" placeholder="Search code, title, faculty…"
                 value={courseQuery} onChange={(e) => setCourseQuery(e.target.value)} />
             </div>
@@ -572,6 +589,23 @@ function FacultyPanel({ initialSelection, onSelectionConsumed, onBackToTimetable
   const [nowMs, setNowMs] = useState(Date.now());
   const [message, setMessage] = useState({ text: "", type: "info" });
 
+  const getFacultyLocation = () => new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("Geolocation is not supported in this browser."));
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => resolve({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+      }),
+      (error) => reject(error),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+    );
+  });
+
   const refreshSessionRoster = async (sessionInfo, qrSessionInfo = activeQrSession) => {
     if (!sessionInfo?.id) return;
 
@@ -672,15 +706,21 @@ function FacultyPanel({ initialSelection, onSelectionConsumed, onBackToTimetable
 
     try {
       setQrBusy(true);
+      setMessage({ text: "Requesting faculty location...", type: "info" });
+      const facultyLocation = await getFacultyLocation();
       const res = await client.post("/attendance/qr-sessions/", {
         class_session_id: Number(selectedSession.id),
         duration_minutes: Number(qrDurationMinutes),
+        faculty_latitude: facultyLocation.latitude,
+        faculty_longitude: facultyLocation.longitude,
+        faculty_location_accuracy: facultyLocation.accuracy,
       });
       setActiveQrSession(res.data);
       await refreshSessionRoster(selectedSession, res.data);
       setMessage({ text: "QR session created. Students are premarked absent and will turn present on scan.", type: "success" });
     } catch (err) {
-      setMessage({ text: err?.response?.data?.detail || "Could not generate QR session.", type: "warning" });
+      const detail = err?.response?.data?.detail || err?.message || "Could not generate QR session.";
+      setMessage({ text: detail, type: "warning" });
     } finally {
       setQrBusy(false);
     }
@@ -716,22 +756,22 @@ function FacultyPanel({ initialSelection, onSelectionConsumed, onBackToTimetable
       {/* Stats */}
       <div className="stat-grid">
         <div className="stat-card teal">
-          <span className="stat-icon">📚</span>
+          <span className="stat-icon"><BookOpen size={20} /></span>
           <span className="stat-label">Class Session</span>
           <strong className="stat-value">{selectedSession ? `${selectedSession.start_time}` : "-"}</strong>
         </div>
         <div className="stat-card green">
-          <span className="stat-icon">✅</span>
+          <span className="stat-icon"><CheckCircle size={20} /></span>
           <span className="stat-label">Present</span>
           <strong className="stat-value">{presentCount}</strong>
         </div>
         <div className="stat-card amber">
-          <span className="stat-icon">⏰</span>
+          <span className="stat-icon"><Clock size={20} /></span>
           <span className="stat-label">QR Timer</span>
           <strong className="stat-value">{timerText}</strong>
         </div>
         <div className="stat-card blue">
-          <span className="stat-icon">❌</span>
+          <span className="stat-icon"><X size={20} /></span>
           <span className="stat-label">Absent</span>
           <strong className="stat-value">{absentCount}</strong>
         </div>
@@ -1290,17 +1330,17 @@ function StudentPanel({ activeSection }) {
         {/* Summary stats */}
         <div className="stat-grid">
           <div className="stat-card blue">
-            <span className="stat-icon">📅</span>
+            <span className="stat-icon"><Calendar size={20} /></span>
             <span className="stat-label">Total Classes</span>
             <strong className="stat-value">{summary.total}</strong>
           </div>
           <div className="stat-card green">
-            <span className="stat-icon">✅</span>
+            <span className="stat-icon"><CheckCircle size={20} /></span>
             <span className="stat-label">Present</span>
             <strong className="stat-value">{summary.present}</strong>
           </div>
           <div className="stat-card amber">
-            <span className="stat-icon">📊</span>
+            <span className="stat-icon"><BarChart2 size={20} /></span>
             <span className="stat-label">Attendance</span>
             <strong className="stat-value">{summary.pct}%</strong>
           </div>
