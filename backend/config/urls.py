@@ -6,4 +6,5 @@ urlpatterns = [
     path("api/auth/", include("accounts.urls")),
     path("api/academics/", include("academics.urls")),
     path("api/attendance/", include("attendance.urls")),
+    path("api/chatbot/", include("chatbot.urls")),
 ]
