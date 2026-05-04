@@ -24,6 +24,11 @@ export default function ChatWidget({ open, onClose }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const endOfMessagesRef = React.useRef(null);
+
+  React.useEffect(() => {
+    endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const send = async () => {
     if (!input.trim()) return;
@@ -95,6 +100,7 @@ export default function ChatWidget({ open, onClose }) {
               )}
             </div>
           ))}
+          <div ref={endOfMessagesRef} />
         </div>
         <div className="chat-footer">
           <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about the database..." />
